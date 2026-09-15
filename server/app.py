@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+from dataclasses import replace
 import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
@@ -471,6 +472,19 @@ async def bootstrap(port: int = 17777) -> None:
     work_preview_auip_callback = work_preview.on_auip_updated
     bus.on(Method.AUIP_UPDATED, work_preview_auip_callback)
     provider_runtime.set_request_preparer(work_ledger.prepare_request)
+    # After a restart, in-flight attempts from the previous process are
+    # phantom: their runtime is gone and their writer leases would block fresh
+    # work. Cancel them before adopting whatever the current runtime recovered.
+    try:
+        stale = work_ledger.recover_stale_runtime_attempts()
+        if stale.get("attempts") or stale.get("leases"):
+            logger.info(
+                "startup cleanup: cancelled %s stale attempts, released %s leases",
+                stale.get("attempts", 0),
+                stale.get("leases", 0),
+            )
+    except Exception:
+        logger.exception("startup cleanup of stale runtime attempts failed")
     work_ledger.adopt_runtime_records(provider_runtime.list_runs())
     work_ledger.configure()
     work_activity = WorkActivityCoordinator()
@@ -597,6 +611,57 @@ async def bootstrap(port: int = 17777) -> None:
             raise HTTPException(status_code=400, detail="payload must be an object")
         result = await _speak_vn_reaction(payload)
         return {"ok": True, **(result or {})}
+
+    @app.post("/vision/describe")
+    async def vision_describe(payload: dict, request: Request):
+        """Capture a screenshot and describe it with the configured vision model (Qwen-VL).
+
+        Used by the dsh-amadeus plugin so a text-only DSH agent can "see" the
+        desktop / current window. Returns a text description plus capture metadata.
+        """
+        if not _http_request_authenticated(request.headers, auth_policy):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _http_request_origin_allowed(request.headers, backend_port=port):
+            raise HTTPException(status_code=403, detail="Untrusted request origin")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be an object")
+
+        from server.visual_runtime import capture_visual_context
+
+        scope = str(payload.get("scope") or "current_window").strip()
+        captured = capture_visual_context(scope=scope or None, reason="dsh_plugin")
+        if not captured.get("enabled") or not isinstance(captured.get("frame"), dict):
+            return {"ok": True, "status": "capture_failed", "capture": captured}
+        frame = captured["frame"]
+        image_base64 = str(frame.get("dataBase64") or "").strip()
+        if not image_base64:
+            return {"ok": True, "status": "capture_failed", "reason": "empty_frame", "capture": captured}
+
+        from llm.qwen_client import qwen_vision_describe
+
+        prompt = str(payload.get("prompt") or "").strip()
+        described = qwen_vision_describe(
+            image_base64,
+            prompt=prompt
+            or "请用中文描述这张截图：正在显示什么应用/窗口、关键界面元素、可见文字、以及值得注意的地方。",
+        )
+        capture_summary = {
+            key: captured.get(key)
+            for key in ("scope", "actualScope", "capturedAt", "capture")
+        }
+        if not described:
+            return {
+                "ok": True,
+                "status": "describe_failed",
+                "reason": "vision_model_unavailable",
+                "capture": capture_summary,
+            }
+        return {
+            "ok": True,
+            "status": "ok",
+            "description": str(described.get("description") or "").strip(),
+            "capture": capture_summary,
+        }
 
     @app.get("/wallpaper/bridge-info")
     async def wallpaper_bridge_info():
@@ -1313,9 +1378,12 @@ async def bootstrap(port: int = 17777) -> None:
         if source == "vn_player":
             await _handle_vn_player_asr_recognized(payload)
             return
-        if source != "wake":
+        # wake and manual microphone (empty source) both auto-submit,
+        # so clicking the mic gives real-time voice interaction.
+        if source not in ("wake", ""):
             return
-        await _send_wake_text(str(payload.get("text") or ""), source="wake ASR")
+        label = "wake ASR" if source == "wake" else "mic ASR"
+        await _send_wake_text(str(payload.get("text") or ""), source=label)
 
     async def _handle_vn_player_asr_recognized(payload: dict) -> None:
         text = str(payload.get("text") or "").strip()
@@ -2139,10 +2207,14 @@ async def bootstrap(port: int = 17777) -> None:
     )
     work_activity.configure()
     interaction_branch.configure()
-    from server.character_presentation import project_auip_update
+    from server.character_presentation import (
+        asr_listening_presentation,
+        project_auip_update,
+    )
 
     auip_presentation_callback = project_auip_update
     bus.on(Method.AUIP_UPDATED, auip_presentation_callback)
+    bus.on(Method.ASR_STATUS, asr_listening_presentation)
     output_idle_probe = lambda: not (chat_h.is_busy() or _tts_is_observer_output_busy())
     work_observer.configure(
         is_chat_busy=chat_h.is_busy,
@@ -3882,6 +3954,29 @@ def _delegate_provider_selection(
         ),
     )
     requirements = compile_delegate_requirements(facts)
+    # Web research routes to the Qwen Web Research path (provider="browser")
+    # when configured, regardless of a workspace pin or a generic model label
+    # such as "codex"/"openclaw": a research query does not need a workspace
+    # writer, and diverting it avoids blocking on one. The decision is based
+    # on actual file/code mutation evidence in the user text, not on a pinned
+    # project's workspace effect. Explicit user choice (force_provider="user")
+    # and genuine amend continuation are always respected.
+    if (
+        str(getattr(settings, "DASHSCOPE_API_KEY", "") or "").strip()
+        and not facts.task_requests_workspace_mutation
+        and not facts.source_requests_workspace_mutation
+        and not facts.requires_browser_state
+        and str(facts.declared_intent or "").strip().lower() != "amend"
+        and not facts.user_forced_provider
+        and facts.requested_provider not in {"browser", "qwen", "web"}
+    ):
+        requirements = replace(
+            requirements,
+            task_kind="general",
+            workspace_access="none",
+            preferred_provider="browser",
+            preference_policy="prefer",
+        )
     default_provider = str(
         getattr(settings, "PROVIDER_DELEGATE_DEFAULT_PROVIDER", "openclaw")
         or "openclaw"

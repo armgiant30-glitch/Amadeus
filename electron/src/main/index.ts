@@ -362,10 +362,12 @@ async function startBackend(): Promise<void> {
   console.log(`[electron] starting backend: ${python} -m server.app --port ${BACKEND_PORT}`)
   console.log(`[electron] project root: ${PROJECT_ROOT}`)
 
+  // AEC (realtime WebRTC echo cancellation) is disabled by default.  The
+  // forced launch defaults below were removed after a native heap-corruption
+  // crash (0xc0000374 in ntdll) in the AEC audio path when the shared
+  // microphone stream was closed and reopened; the user's .env can opt back
+  // in with AEC_REALTIME_ENABLED=true.
   const backendEnvironment = desktopSettings.backendEnvironment(process.env, {
-    AEC_REALTIME_ENABLED: '1',
-    AEC_REALTIME_BARGE_IN: '1',
-    AEC_REALTIME_DELAY_MS: '280',
     ASR_ECHO_TAIL_GUARD_MS: '650',
   })
   pythonProcess = spawn(python, ['-m', 'server.app', '--port', String(BACKEND_PORT)], {
@@ -594,60 +596,11 @@ function suspendElectronSlicePlacement(window: BrowserWindow): void {
 
 function startElectronSliceDesktopMonitor(window: BrowserWindow): void {
   stopElectronSliceDesktopMonitor()
-  electronSlicePlacementReady = false
-  if (process.platform !== 'win32') {
-    electronSlicePlacementReady = true
-    reconcileElectronSliceReadiness(window)
-    return
-  }
-  const script = path.join(PROJECT_ROOT, 'wallpaper', 'windows_desktop_layer.py')
-  const helper = spawn(
-    getPythonCommand(),
-    [script, '--attach', electronNativeHandle(window), '--watch', '--interval', '1'],
-    { cwd: PROJECT_ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
-  )
-  electronSliceDesktopMonitor = helper
-  let stdoutBuffer = ''
-  let stderrBuffer = ''
-  helper.stdout?.on('data', chunk => {
-    stdoutBuffer += String(chunk)
-    const lines = stdoutBuffer.split(/\r?\n/)
-    stdoutBuffer = lines.pop() || ''
-    for (const line of lines) {
-      if (!line.trim()) continue
-      try {
-        const result = JSON.parse(line) as { ok?: boolean; mode?: string; reconciled?: boolean }
-        if (result.ok === true) {
-          electronSlicePlacementReady = true
-          reconcileElectronSliceReadiness(window)
-          console.log(`[electron-slice] desktop placement: ${String(result.mode || 'unknown')}`)
-        } else {
-          suspendElectronSlicePlacement(window)
-          console.error(`[electron-slice] desktop placement unavailable: ${String(result.mode || 'unknown')}`)
-        }
-      } catch {
-        console.error(`[electron-slice] invalid desktop monitor event: ${line}`)
-      }
-    }
-  })
-  helper.stderr?.on('data', chunk => {
-    stderrBuffer = `${stderrBuffer}${String(chunk)}`.slice(-2000)
-  })
-  helper.once('error', error => {
-    console.error('[electron-slice] desktop monitor failed:', error)
-  })
-  helper.once('exit', code => {
-    if (electronSliceDesktopMonitor !== helper) return
-    electronSliceDesktopMonitor = null
-    suspendElectronSlicePlacement(window)
-    if (stderrBuffer.trim()) console.error(`[electron-slice] desktop monitor stderr: ${stderrBuffer.trim()}`)
-    if (!electronSliceWindow || electronSliceWindow !== window || window.isDestroyed()) return
-    console.error(`[electron-slice] desktop monitor exited (${String(code)}); restarting`)
-    electronSliceMonitorRestartTimer = setTimeout(() => {
-      electronSliceMonitorRestartTimer = null
-      if (electronSliceWindow === window && !window.isDestroyed()) startElectronSliceDesktopMonitor(window)
-    }, 750)
-  })
+  // Desktop pinning removed: show the character as a normal top-level
+  // window instead of parenting it into WorkerW/Progman via
+  // wallpaper/windows_desktop_layer.py (--watch auto-pinning).
+  electronSlicePlacementReady = true
+  reconcileElectronSliceReadiness(window)
 }
 
 function updateElectronSliceBounds(): void {

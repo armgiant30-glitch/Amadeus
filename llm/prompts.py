@@ -299,6 +299,14 @@ def render_provider_routing_addon(
                 "- Browser action=\"open\" は一回の atomic navigation であり、ユーザーが示した URL（または現在の live page で確認済みの URL）が必要である。Browser を選ぶために URL を推測してはいけない。その証拠がないサイト・ページ探索、比較、Web 調査の統合は Agent research である。",
             )
         )
+        from config import settings as _routing_settings
+        if str(getattr(_routing_settings, "DASHSCOPE_API_KEY", "") or "").strip():
+            lines.append(
+                wording(
+                    "- For general web research / retrieval with no live page (search facts, compare sources, gather current information), prefer provider=\"browser\": its built-in Qwen Web Research performs the search server-side and returns a grounded answer without opening a page. Use openclaw only when Qwen research is not configured.",
+                    "- live page を必要としない一般的な Web 調査・検索（事実検索、情報源の比較、最新情報の収集）は provider=\"browser\" を優先すること。内蔵の Qwen Web Research がサーバーサイドで検索し、ページを開かずに根拠付きの回答を返す。Qwen が未設定の場合のみ openclaw を使うこと。",
+                )
+            )
     if "openclaw" in providers:
         lines.append(
             wording(

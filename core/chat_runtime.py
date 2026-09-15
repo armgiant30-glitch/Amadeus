@@ -40,6 +40,7 @@ from config.settings import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL_NAME,
     OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL_NAME,
     GEMINI_API_KEY, GEMINI_MODEL_NAME,
+    DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, QWEN_VL_MODEL_NAME,
     AWS_BEDROCK_BEARER_TOKEN, AWS_BEDROCK_AUTH_MODE, AWS_BEDROCK_REGION,
     AWS_BEDROCK_MODEL_ID, AWS_BEDROCK_USE_INFERENCE_PROFILE,
     AWS_BEDROCK_INFERENCE_PROFILE_ID, AWS_BEDROCK_ENDPOINT,
@@ -991,6 +992,7 @@ class ChatRuntime:
         # 懒初始化的客户端/知识库
         self.llm_client = None
         self.gemini_model = None
+        self.qwen_vision_client = None
         self.rag_system = None
         # 当前对话 GUI callback，供 delegate 第二轮复用
         self.current_gui_callback = None
@@ -1085,6 +1087,7 @@ class ChatRuntime:
             # provider 切换后强制重建客户端（原 chatGui 通过置空 llm_client 实现）
             self.llm_client = None
             self.gemini_model = None
+            self.qwen_vision_client = None
         self.provider = provider
         # Compatibility projection for diagnostics and old read-only callers.
         # Routing itself is owned exclusively by ``provider``.
@@ -1155,6 +1158,19 @@ class ChatRuntime:
             from llm.visual_context import visual_notice_text
 
             _text_only_question = visual_notice_text(question, _visual_context, supported=False)
+
+        # ── 视觉 provider 路由：主模型收不了图时，带视觉的轮次整体走 Gemini ──
+        # DeepSeek/local 不支持图片输入；当本轮携带视觉帧（用户附图或屏幕截图）
+        # 时，把整个轮次路由到配置的视觉 provider（Gemini），让视觉模型真正看图，
+        # 而不是让主模型假装看见。
+        if _visual_context and llm_provider not in {"openai", "gemini", "hybrid3"}:
+            # Vision-capable remote: DeepSeek/local cannot receive images.
+            # Route the visual turn through Qwen VL on DashScope (the user's
+            # working DashScope key), keeping the main model unchanged.
+            from config import settings as _vision_settings
+
+            if str(getattr(_vision_settings, "DASHSCOPE_API_KEY", "") or "").strip():
+                llm_provider = "qwen_vision"
 
         # 1. 重置状态
         logger.info("new conversation turn started; clearing sentence queue...")
@@ -1281,6 +1297,8 @@ class ChatRuntime:
                 await self._run_deepseek_openai(st, question, _visual_context, enable_conv, llm_provider)
             elif llm_provider == "gemini":
                 await self._run_gemini(st, question, _visual_context, enable_conv)
+            elif llm_provider == "qwen_vision":
+                await self._run_deepseek_openai(st, question, _visual_context, enable_conv, llm_provider)
             elif llm_provider == "bedrock":
                 early_return = await self._run_bedrock(
                     st, question, _text_only_question, _original_question, enable_conv
@@ -1489,6 +1507,24 @@ class ChatRuntime:
             from llm.gemini_client import create_gemini_client
 
             self.gemini_model = create_gemini_client(GEMINI_API_KEY)
+        elif llm_provider == "qwen_vision" and self.qwen_vision_client is None:
+            import httpx
+            from openai import OpenAI
+
+            http_client = httpx.Client(
+                limits=httpx.Limits(
+                    max_connections=10,
+                    max_keepalive_connections=5,
+                    keepalive_expiry=60.0,
+                ),
+                timeout=httpx.Timeout(60.0),
+                http2=False,
+            )
+            self.qwen_vision_client = OpenAI(
+                api_key=DASHSCOPE_API_KEY,
+                base_url=DASHSCOPE_BASE_URL,
+                http_client=http_client,
+            )
         elif llm_provider == "bedrock":
             init_llm_client()
         elif llm_provider in ("hybrid", "hybrid2", "hybrid3"):
@@ -4311,7 +4347,7 @@ class ChatRuntime:
         if visual_context:
             from llm.visual_context import attach_openai_chat_image, visual_notice_text
 
-            if llm_provider == "openai":
+            if llm_provider in {"openai", "qwen_vision"}:
                 messages = attach_openai_chat_image(messages, visual_context)
             else:
                 messages[-1]["content"] = visual_notice_text(
@@ -4321,7 +4357,13 @@ class ChatRuntime:
                 )
 
         request_kwargs = {
-            "model": OPENAI_MODEL_NAME if llm_provider == "openai" else DEEPSEEK_MODEL_NAME,
+            "model": (
+                QWEN_VL_MODEL_NAME
+                if llm_provider == "qwen_vision"
+                else OPENAI_MODEL_NAME
+                if llm_provider == "openai"
+                else DEEPSEEK_MODEL_NAME
+            ),
             "messages": messages,
             "stream": True,
             # Matches the pooled client's own 30s rather than overriding it
@@ -4351,7 +4393,12 @@ class ChatRuntime:
                 "extra_body": {"thinking": {"type": "disabled"}},
             })
         tool_calls = self._delegate_tool_accumulator(request_kwargs)
-        response = self.llm_client.chat.completions.create(**request_kwargs)
+        vision_client = (
+            self.qwen_vision_client
+            if llm_provider == "qwen_vision"
+            else self.llm_client
+        )
+        response = vision_client.chat.completions.create(**request_kwargs)
 
         async for chunk in _aiter_sync_iter(response):
             if not chunk.choices:

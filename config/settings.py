@@ -80,6 +80,16 @@ if LLM_PROVIDER not in LLM_PROVIDERS:
 DEEPSEEK_API_KEY   = _str("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL  = _str("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL_NAME = _str("DEEPSEEK_MODEL_NAME", "deepseek-v4-flash")
+# ===========================================================================
+# LLM 提供商 — Qwen / DashScope（联网检索专用链路）
+# 主模型仍由 LLM_PROVIDER 决定（默认 deepseek）。配置 DASHSCOPE_API_KEY 后，
+# Amadeus 的 Web 检索/查资料走 Qwen 的 enable_search：联网搜索在阿里云服务端
+# 完成，不经本地浏览器，不受反爬/被墙站点影响。
+# ===========================================================================
+DASHSCOPE_API_KEY  = _str("DASHSCOPE_API_KEY").strip()
+DASHSCOPE_BASE_URL = _str("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").strip()
+QWEN_MODEL_NAME    = _str("QWEN_MODEL_NAME", "qwen-plus").strip()
+QWEN_VL_MODEL_NAME = _str("QWEN_VL_MODEL_NAME", "qwen-vl-max").strip()
 
 # ===========================================================================
 # LLM 提供商 — OpenAI / GPT
@@ -390,6 +400,9 @@ ASR_LISTEN_TIMEOUT_SECONDS = _float("ASR_LISTEN_TIMEOUT_SECONDS", 15.0)
 ASR_PREROLL_MS = _int("ASR_PREROLL_MS", 500)
 ASR_ENERGY_END_RMS = _float("ASR_ENERGY_END_RMS", 0.008)
 ASR_ENERGY_END_MS = _int("ASR_ENERGY_END_MS", 450)
+# Recovery watchdog while a post-barge-in capture still lacks ownership from
+# its fresh Conversation VAD iterator.  This is not the user's speech limit;
+# after VAD takeover, ASR_MAX_SPEECH_SECONDS is the absolute bound.
 ASR_HANDOFF_MAX_CAPTURE_SECONDS = _float("ASR_HANDOFF_MAX_CAPTURE_SECONDS", 5.0)
 # 两段式投机端点：短静音（下值）先把已捕获音频提交给 ASR 后端并行转写，
 # 长静音（ASR_VAD_SILENCE_MS / ASR_ENERGY_END_MS）确认端点后若说话未恢复

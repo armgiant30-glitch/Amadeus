@@ -642,6 +642,7 @@ class CodexAppServerAdapter:
                     config_overrides=(
                         *self._provider_config_overrides(),
                         *self._service_tier_config_overrides(),
+                        *self._sandbox_config_overrides(),
                         *codex_mcp_config_overrides(self._mcp_connections),
                     ),
                     env=self._codex_process_env_with_provider_key(),
@@ -667,6 +668,22 @@ class CodexAppServerAdapter:
         if self.service_tier == "fast":
             return ("features.fast_mode=true",)
         return ()
+
+    def _sandbox_config_overrides(self) -> tuple[str, ...]:
+        """Allow outbound network by default so web-fetch tasks do not stall
+        on a per-request approval. Off by default in the upstream runtime;
+        Amadeus web research, scraping, and API queries all require network.
+        Set AMADEUS_CODEX_NETWORK_DISABLED=1 to keep the strict sandbox.
+        """
+
+        if (
+            str(os.environ.get("AMADEUS_CODEX_NETWORK_DISABLED", "0"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ):
+            return ()
+        return ("sandbox_workspace_write.network_access=true",)
 
     def _provider_bridge(self) -> CodexDesktopProviderBridge | None:
         if self._desktop_provider_bridge is not None:
@@ -750,6 +767,36 @@ class CodexAppServerAdapter:
         normalized_path = os.pathsep.join(ordered)
         return {path_key: normalized_path} if normalized_path else None
 
+    @staticmethod
+    @staticmethod
+    def _is_network_approval(method: str, params: dict[str, Any]) -> bool:
+        """True when the approval needs outbound network access.
+
+        Codex 0.147 uses two approval lanes for network: the older
+        commandExecution requestApproval carrying a networkApprovalContext,
+        and the Network Access Guardian whose action type is "networkAccess"
+        with host/port/target. Either one means the model wants to reach the
+        internet; auto-allow it so web-fetch tasks do not stall. File writes,
+        sandbox permission grants, and shell commands without a URL keep the
+        normal approval flow.
+        """
+
+        source = dict(params or {})
+        # 1) Explicit network context on a command approval.
+        network = source.get("networkApprovalContext")
+        if isinstance(network, dict) and str(network.get("host") or "").strip():
+            return True
+        # 2) Network Access Guardian review action.
+        action = source.get("action") or source.get("review_action") or {}
+        if isinstance(action, dict) and str(action.get("type") or "").lower() == "networkaccess":
+            return True
+        if str(source.get("type") or "").lower() == "networkaccess":
+            return True
+        if str(source.get("host") or "").strip():
+            return True
+        # 3) Command text explicitly contains an http(s) URL.
+        command = str(source.get("command") or "").lower()
+        return "http://" in command or "https://" in command
     def _handle_sdk_approval(
         self,
         method: str,
@@ -758,6 +805,14 @@ class CodexAppServerAdapter:
         """Bridge an official SDK callback to the canonical permission lane."""
 
         source = dict(params or {})
+
+        # Auto-allow network-only approvals so web fetch/research tasks do
+        # not stall on a manual approval card. This only matches command
+        # executions carrying a networkApprovalContext; file writes and
+        # sandbox permission grants still go through the normal Host lane.
+        if self._is_network_approval(method, source):
+            return self._native_approval_response(method, source, allow=True)
+
         thread_id = str(source.get("threadId") or "").strip()
         turn_id = str(source.get("turnId") or "").strip()
         with self._approval_condition:
