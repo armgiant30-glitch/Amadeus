@@ -6,6 +6,11 @@ import logging
 import time
 from typing import Any
 
+from agent_host.provider_identity import (
+    PARENT_CONTEXT_DELIVERY_METADATA_KEY,
+    parent_conversation_context_delivery,
+    validated_parent_context_delivery,
+)
 from agent_host.provider_types import ProviderSteerRequest
 from server.ai_os_schema import work_note_payload, work_signal
 from server.event_bus import bus
@@ -23,6 +28,10 @@ async def route_active_amendment(
     selected_provider: str,
     task_text: str,
     turn_id: str,
+    source_user_text: str = "",
+    source_user_context: str = "",
+    source_context_scope: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Steer an active target natively or prepare a confirmed replacement.
 
@@ -42,6 +51,7 @@ async def route_active_amendment(
             "The ledger still shows that task as active, but its live run is not attached, "
             "so I did not start a second writer. Check or resume the task first.",
             reason="active_runtime_missing",
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] active runtime is unavailable"}
     if active.provider.strip().lower() != str(selected_provider or "").strip().lower():
@@ -50,6 +60,7 @@ async def route_active_amendment(
             "That task is already running with a different executor, so I did not switch "
             "executors in the middle of its workspace changes.",
             reason="provider_change_during_active_amendment",
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] active provider differs"}
     manifest = runtime.get_manifest(active.provider)
@@ -58,6 +69,7 @@ async def route_active_amendment(
             active.provider,
             "The active executor is no longer registered, so the change could not be applied.",
             reason="active_provider_unregistered",
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] provider unavailable"}
     if manifest.capabilities.steering == "immediate":
@@ -67,6 +79,19 @@ async def route_active_amendment(
             else {}
         )
         revision = max(0, int(steering.get("revision") or 0)) + 1
+        previous_delivery = validated_parent_context_delivery(
+            record.metadata.get(PARENT_CONTEXT_DELIVERY_METADATA_KEY)
+        )
+        delivered_context, context_mode = parent_conversation_context_delivery(
+            source_user_context,
+            source_scope=source_context_scope,
+            previous_delivery=previous_delivery,
+            continuity_verified=True,
+        )
+        base_turn_id = str(
+            previous_delivery.get("source_turn_id")
+            or ""
+        ).strip()
         outcome = await runtime.steer(
             active.provider_run_id,
             ProviderSteerRequest(
@@ -76,6 +101,27 @@ async def route_active_amendment(
                     "turn_id": str(turn_id or ""),
                     "work_item_id": active.work_item_id,
                     "attempt_id": active.attempt_id,
+                    **(
+                        {"source_user_text": str(source_user_text)[:4000]}
+                        if str(source_user_text or "").strip()
+                        else {}
+                    ),
+                    **(
+                        {"source_user_context": delivered_context}
+                        if delivered_context
+                        else {}
+                    ),
+                    "source_context_mode": context_mode,
+                    **(
+                        {"source_context_scope": str(source_context_scope)[:800]}
+                        if str(source_context_scope or "").strip()
+                        else {}
+                    ),
+                    **(
+                        {"source_context_base_turn_id": base_turn_id[:200]}
+                        if base_turn_id
+                        else {}
+                    ),
                 },
             ),
         )
@@ -93,12 +139,14 @@ async def route_active_amendment(
                 "I stopped the active run, but could not carry it forward, so the "
                 "change was not applied and nothing is running now.",
                 reason=str(outcome.get("reason") or "steer_aborted_without_continuation"),
+                session_id=session_id,
             )
             return {"handled": True, "message": "[amend blocked] steer aborted without continuation"}
         await _announce_failure(
             active.provider,
             "The active executor did not accept the change, so its current plan is still running.",
             reason=str(outcome.get("reason") or "native_steer_rejected"),
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] native steer rejected"}
     if manifest.capabilities.cancellation != "confirmed":
@@ -107,6 +155,7 @@ async def route_active_amendment(
             "This executor cannot confirm that it has stopped, so I did not risk starting "
             "another writer in the same workspace.",
             reason="confirmed_cancellation_unavailable",
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] cancellation is not confirmable"}
     try:
@@ -120,6 +169,7 @@ async def route_active_amendment(
             active.provider,
             "I could not bind that change to the active task, so I left the current run alone.",
             reason=str(exc) or exc.__class__.__name__,
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] replacement could not be prepared"}
     control = dict(replacement.get("control") or {})
@@ -141,12 +191,19 @@ async def route_active_amendment(
             "The executor did not confirm that it stopped, so I did not start the revised run. "
             "The existing task remains the only writer.",
             reason=reason,
+            session_id=session_id,
         )
         return {"handled": True, "message": "[amend blocked] cancellation unconfirmed"}
     return {"handled": False, "replacement": replacement}
 
 
-async def _announce_failure(provider: str, summary: str, *, reason: str) -> None:
+async def _announce_failure(
+    provider: str,
+    summary: str,
+    *,
+    reason: str,
+    session_id: str = "",
+) -> None:
     """Correct the model's promise when an active amendment was not applied."""
 
     try:
@@ -156,7 +213,8 @@ async def _announce_failure(provider: str, summary: str, *, reason: str) -> None
             source="work_control",
             provider=str(provider or "provider"),
             run_id=f"steer_{time.time_ns()}",
-            session_id=sm.get_current_session_id() or "",
+            session_id=str(session_id or "").strip()
+            or (sm.get_current_session_id() or ""),
             phase="Result",
             title="Requested change was not applied",
             summary=summary,

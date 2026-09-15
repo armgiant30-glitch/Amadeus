@@ -179,6 +179,7 @@ class RuntimeStatusCollector:
             "aec": self._section(self._aec),
             "provider": self._section(self._provider),
             "coordinator": self._section(self._coordinator),
+            "turn_decision_shadow": self._section(self._turn_decision_shadow),
         }
         snapshot["ready"] = self._ready(snapshot)
         snapshot["derived"] = self._section(lambda: self._derived(snapshot))
@@ -189,6 +190,12 @@ class RuntimeStatusCollector:
         from core.turn_coordinator import get_turn_coordinator
 
         return get_turn_coordinator().snapshot()
+
+    @staticmethod
+    def _turn_decision_shadow() -> dict[str, Any]:
+        from server.turn_decision_shadow import get_turn_decision_shadow_observer
+
+        return get_turn_decision_shadow_observer().snapshot()
 
     @staticmethod
     def _section(fn: Callable[[], Any]) -> Any:
@@ -311,6 +318,15 @@ class RuntimeStatusCollector:
                 "backend_ready": bool(getattr(mgr, "is_ready", False)),
                 "mic_index": getattr(mgr, "_mic_index", None),
             })
+            # VAD state comes from the manager's public contract:
+            # "ready" (silero) / "fallback" (tier absence) / "degraded"
+            # (installed but broken — reason must stay observable).
+            vad_status = getattr(mgr, "vad_status", None)
+            if callable(vad_status):
+                vad_state, vad_reason = vad_status()
+                out["vad"] = str(vad_state)
+                if vad_reason:
+                    out["vad_degraded"] = str(vad_reason)
         return out
 
     def _wake(self) -> dict[str, Any]:
@@ -420,6 +436,10 @@ class RuntimeStatusCollector:
         asr_ready = self._ready_probe(
             lambda: bool((snapshot.get("asr") or {}).get("manager_loaded"))
             and bool((snapshot.get("asr") or {}).get("backend_ready"))
+            # Installed-but-broken VAD silently loses barge-in, so ASR is not
+            # fully ready; the L2 fallback tier is the designed shape and
+            # stays ready.
+            and (snapshot.get("asr") or {}).get("vad") != "degraded"
         )
         wake_ready = self._ready_probe(
             lambda: bool((snapshot.get("wake") or {}).get("initialized"))

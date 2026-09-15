@@ -24,11 +24,16 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from config.asset_paths import SPRITEFORGE_RUNTIME_ROOT
-from config.settings import WALLPAPER_SFX_GATE_LOG, WALLPAPER_WHEEL_FORWARD
-from wallpaper.pointer_wheel_forwarder import PointerWheelForwarder
+from config.settings import (
+    GRAPHICS_PROFILE,
+    RENDER_EFFECTIVE_MAX_FPS,
+    RENDER_EFFECTIVE_MAX_RESOLUTION,
+    WALLPAPER_SFX_GATE_LOG,
+    WALLPAPER_WHEEL_FORWARD,
+)
 from render.server import AssetServer
 from wallpaper.scene_assets import (
     _PROJECT_ROOT,
@@ -37,11 +42,17 @@ from wallpaper.scene_assets import (
     _PROJECT_SUBTITLE_FRAME,
     _asset_url,
     _crt_bounds_norm,
+    _desktop_slice_bounds_norm,
+    _keyboard_composer_bounds_norm,
+    _keyboard_input_toggle_bounds_norm,
     _load_crt_config,
     _load_wallpaper_ui_config,
     _prepare_background_asset,
     _prepare_scenario_payload,
 )
+
+if TYPE_CHECKING:
+    from wallpaper.pointer_wheel_forwarder import PointerWheelForwarder
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +75,11 @@ _WALLPAPER_CLIENT_ASSETS = (
     _PROJECT_ROOT / "render" / "web" / "electron_slice.html",
     _PROJECT_ROOT / "render" / "web" / "electron_slice_host.js",
     _PROJECT_ROOT / "render" / "web" / "crt_canvas_surface.js",
+    _PROJECT_ROOT / "render" / "web" / "electron_keyboard_composer.js",
+    _PROJECT_ROOT / "render" / "web" / "companion_panel.html",
+    _PROJECT_ROOT / "render" / "web" / "companion_panel.css",
+    _PROJECT_ROOT / "render" / "web" / "companion_panel.js",
+    _PROJECT_ROOT / "render" / "web" / "companion_presentation.js",
     _PROJECT_ROOT / "render" / "web" / "wallpaper_scene.js",
     _PROJECT_ROOT / "render" / "web" / "renderer.js",
 )
@@ -110,8 +126,12 @@ class _BridgeState:
         self.bootstrap_calls: list[dict] = []
         self.bootstrap_keys: dict[str, int] = {}
         self.last_calls: dict[str, dict] = {}
+        # Compact cards retain the last spoken line for this bridge lifetime;
+        # wallpaper subtitles still clear normally when speech finishes.
+        self.last_caption: dict | None = None
         self.action_token = secrets.token_urlsafe(24)
         self.canvas_action_handler: Callable[[dict], dict] | None = None
+        self.chat_submit_handler: Callable[[dict], dict] | None = None
         self.browser_action_handler: Callable[[dict], dict] | None = None
 
     def snapshot(self) -> dict:
@@ -129,9 +149,15 @@ class _BridgeState:
             "calls": [item for item in (presentation, canvas, attention) if item]
         }
 
-    def add_client(self) -> queue.Queue[dict]:
+    def add_client(self, *, retain_subtitle: bool = False) -> queue.Queue[dict]:
         q: queue.Queue[dict] = queue.Queue()
         with self.lock:
+            # Seed and subscribe under the same lock: reconnecting renderers
+            # must see current Host state before subsequent live updates.
+            for event in (*self.bootstrap_calls, *self.last_calls.values()):
+                if retain_subtitle and event.get("method") == "setSubtitle":
+                    event = self.last_caption or event
+                q.put_nowait(event)
             self.clients.append(q)
         return q
 
@@ -145,6 +171,10 @@ class _BridgeState:
     def add_canvas_client(self) -> queue.Queue[dict]:
         q: queue.Queue[dict] = queue.Queue()
         with self.lock:
+            for key in ("canvasPresentation", "canvas", "attention"):
+                event = self.last_calls.get(key)
+                if event:
+                    q.put_nowait(event)
             self.canvas_clients.append(q)
         return q
 
@@ -159,6 +189,8 @@ class _BridgeState:
         with self.lock:
             if replay:
                 self.last_calls[replay] = event
+            if event.get("method") == "setSubtitle" and str(event["args"][0] or "").strip():
+                self.last_caption = event
             clients = list(self.clients)
             canvas_clients = (
                 list(self.canvas_clients)
@@ -487,6 +519,22 @@ def _make_bridge_handler(
             finally:
                 remove_client(client)
 
+        def _route_chat_submit(self, payload: dict) -> dict:
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                return {"ok": False, "error": "empty_message"}
+            if len(text) > 8000:
+                return {"ok": False, "error": "message_too_long"}
+            handler = state.chat_submit_handler
+            if handler is None:
+                return {"ok": False, "error": "wallpaper_chat_unavailable"}
+            try:
+                result = handler({"text": text})
+            except Exception as exc:
+                logger.warning("[WallpaperBridge] wallpaper chat submit failed: %s", exc)
+                return {"ok": False, "error": "wallpaper_chat_failed"}
+            return result if isinstance(result, dict) else {"ok": True, "result": result}
+
         def do_OPTIONS(self):
             auth_error = self._request_authorization_error()
             if auth_error:
@@ -519,7 +567,11 @@ def _make_bridge_handler(
                 self._stream_events(state.add_canvas_client, state.remove_canvas_client)
                 return
             if self.path.startswith("/wallpaper-engine/events") or self.path.startswith("/wallpaper/events"):
-                self._stream_events(state.add_client, state.remove_client)
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                self._stream_events(
+                    lambda: state.add_client(retain_subtitle=query.get("retainSubtitle") == ["true"]),
+                    state.remove_client,
+                )
                 return
             if self.path.startswith("/wallpaper-engine/health") or self.path.startswith("/wallpaper/health"):
                 body = b'{"ok":true}'
@@ -536,6 +588,18 @@ def _make_bridge_handler(
             auth_error = self._request_authorization_error()
             if auth_error:
                 self._json_response({"ok": False, "error": auth_error}, 403)
+                return
+            if self.path.startswith("/wallpaper-engine/chat-action") or self.path.startswith("/wallpaper/chat-action"):
+                if not self._action_authorized():
+                    logger.warning("[WallpaperBridge] unauthorized wallpaper chat action from=%s", self.client_address)
+                    self._json_response({"ok": False, "error": "unauthorized"}, 403)
+                    return
+                try:
+                    result = self._route_chat_submit(self._read_json())
+                except Exception as exc:
+                    logger.warning("[WallpaperBridge] failed to parse wallpaper chat action: %s", exc)
+                    result = {"ok": False, "error": "bad_request"}
+                self._json_response(result, 200 if result.get("ok") else 400)
                 return
             if self.path.startswith("/wallpaper-engine/canvas-action") or self.path.startswith("/wallpaper/canvas-action"):
                 if not self._action_authorized():
@@ -646,7 +710,10 @@ class WallpaperEngineBridgeHost:
         self._bridge_thread: threading.Thread | None = None
         self._state = _BridgeState()
         self._slice_host = "electron" if str(slice_host).strip().lower() == "electron" else "wallpaper"
-        self._slice_bounds = _crt_bounds_norm()
+        self._canvas_bounds = _crt_bounds_norm()
+        self._keyboard_input_toggle_bounds = _keyboard_input_toggle_bounds_norm()
+        self._keyboard_composer_bounds = _keyboard_composer_bounds_norm()
+        self._slice_bounds = _desktop_slice_bounds_norm()
         self._ready = False
         self.on_ready: Optional[Callable[[], None]] = None
         self._background_asset = _prepare_background_asset()
@@ -654,11 +721,23 @@ class WallpaperEngineBridgeHost:
 
     @property
     def url(self) -> str:
-        slice_param = "&sliceHost=electron" if self._slice_host == "electron" else ""
-        return (
-            f"http://127.0.0.1:{self._asset_port}/render/web/wallpaper_engine.html"
-            f"?bridgePort={self._bridge_port}&host=webwallpaper{slice_param}"
-        )
+        query = self._render_query({
+            "bridgePort": self._bridge_port,
+            "host": "webwallpaper",
+            **({"sliceHost": "electron"} if self._slice_host == "electron" else {}),
+        })
+        return f"http://127.0.0.1:{self._asset_port}/render/web/wallpaper_engine.html?{query}"
+
+    @staticmethod
+    def _render_query(params: dict[str, object]) -> str:
+        render_params: dict[str, object] = {
+            "graphicsProfile": GRAPHICS_PROFILE,
+            "renderMaxFps": RENDER_EFFECTIVE_MAX_FPS,
+            **params,
+        }
+        if RENDER_EFFECTIVE_MAX_RESOLUTION is not None:
+            render_params["renderMaxResolution"] = RENDER_EFFECTIVE_MAX_RESOLUTION
+        return urllib.parse.urlencode(render_params)
 
     @property
     def asset_port(self) -> int:
@@ -681,18 +760,45 @@ class WallpaperEngineBridgeHost:
         return dict(self._slice_bounds)
 
     @property
+    def canvas_bounds(self) -> dict[str, float]:
+        return dict(self._canvas_bounds)
+
+    @property
+    def keyboard_input_toggle_bounds(self) -> dict[str, float]:
+        return dict(self._keyboard_input_toggle_bounds)
+
+    @property
+    def keyboard_composer_bounds(self) -> dict[str, float]:
+        return dict(self._keyboard_composer_bounds)
+
+    @property
     def asset_version(self) -> str:
         return _wallpaper_asset_revision()
 
     @property
+    def render_max_fps(self) -> int:
+        return RENDER_EFFECTIVE_MAX_FPS
+
+    @property
+    def render_max_resolution(self) -> float | None:
+        return RENDER_EFFECTIVE_MAX_RESOLUTION
+
+    @property
+    def graphics_profile(self) -> str:
+        return GRAPHICS_PROFILE
+
+    @property
     def lively_url(self) -> str:
-        slice_param = "&sliceHost=electron" if self._slice_host == "electron" else ""
-        return (
-            f"http://127.0.0.1:{self._asset_port}/wallpaper/lively/index.html"
-            f"?assetPort={self._asset_port}&bridgePort={self._bridge_port}{slice_param}"
-        )
+        query = self._render_query({
+            "assetPort": self._asset_port,
+            "bridgePort": self._bridge_port,
+            **({"sliceHost": "electron"} if self._slice_host == "electron" else {}),
+        })
+        return f"http://127.0.0.1:{self._asset_port}/wallpaper/lively/index.html?{query}"
 
     def start(self) -> "WallpaperEngineBridgeHost":
+        # A new display lifetime cannot inherit suppression from a closed card.
+        self.set_companion_active(False)
         self._asset_port = self._asset_server.start()
         if _SPRITEFORGE_RUNTIME_ROOT.is_dir():
             self._asset_server.mount_static("/spriteforge", _SPRITEFORGE_RUNTIME_ROOT)
@@ -706,13 +812,21 @@ class WallpaperEngineBridgeHost:
                 "assetPort": self._asset_port,
                 "bridgeToken": self._state.action_token,
                 "assetVersion": _wallpaper_asset_revision(),
+                "graphicsProfile": GRAPHICS_PROFILE,
+                "renderMaxFps": RENDER_EFFECTIVE_MAX_FPS,
+                "renderMaxResolution": RENDER_EFFECTIVE_MAX_RESOLUTION,
                 "sliceHost": self._slice_host,
                 "sliceBounds": self._slice_bounds,
+                "canvasBounds": self._canvas_bounds,
+                "keyboardInputToggleBounds": self._keyboard_input_toggle_bounds,
+                "keyboardComposerBounds": self._keyboard_composer_bounds,
             },
         )
         self._init_scene()
         if self._slice_host != "electron" and WALLPAPER_WHEEL_FORWARD and sys.platform == "win32":
             try:
+                from wallpaper.pointer_wheel_forwarder import PointerWheelForwarder
+
                 self._wheel_forwarder = PointerWheelForwarder(
                     lambda dx, dy: self._state.publish(
                         {"method": "pointerWheel", "args": [{"deltaX": dx, "deltaY": dy}]}
@@ -843,6 +957,9 @@ class WallpaperEngineBridgeHost:
     def set_subtitle(self, text: str) -> None:
         self._event("setSubtitle", text, replay="subtitle")
 
+    def set_companion_active(self, active: bool) -> None:
+        self._event("setCompanionActive", bool(active), replay="companion")
+
     def set_canvas_presentation(self, profile: dict) -> None:
         self._event(
             "setCanvasPresentation",
@@ -939,6 +1056,9 @@ class WallpaperEngineBridgeHost:
 
     def set_canvas_action_handler(self, handler: Callable[[dict], dict] | None) -> None:
         self._state.canvas_action_handler = handler
+
+    def set_chat_submit_handler(self, handler: Callable[[dict], dict] | None) -> None:
+        self._state.chat_submit_handler = handler
 
     def set_browser_action_handler(self, handler: Callable[[dict], dict] | None) -> None:
         self._state.browser_action_handler = handler

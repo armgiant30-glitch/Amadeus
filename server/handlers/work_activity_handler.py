@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from config import settings
+from agent_host.provider_identity import PARENT_CONTEXT_DELIVERED_EVENT
 from server.character_presentation import coordinator as character_presentation
 from server.ai_os_schema import (
     action_ref,
@@ -103,10 +104,14 @@ class WorkActivityCoordinator:
 
     async def _on_provider_event(self, _method: str, params: dict[str, Any]) -> None:
         event_type = str(params.get("type") or "").strip().lower()
+        if event_type == PARENT_CONTEXT_DELIVERED_EVENT:
+            # Cursor authority is durable control-plane evidence, not visible
+            # execution progress, liveness, narration, or Canvas activity.
+            return
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
         run_id = str(params.get("run_id") or "").strip()
         payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
         state = self._run_state(params)
-        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
         if metadata:
             state["metadata"] = self._merge_run_metadata(state.get("metadata"), metadata)
         is_replay = bool(metadata.get("replay"))
@@ -244,11 +249,6 @@ class WorkActivityCoordinator:
                 phase="Intake",
                 progress=10,
                 force=True,
-                # The Host knows which bounded goal it just dispatched even
-                # before the Provider reports an implementation milestone.
-                # Surface that one truthful direction so a long cold start is
-                # not two minutes of silence; results remain receipt-owned.
-                narration_keypoint="directional_progress",
             )
             return
 
@@ -434,14 +434,24 @@ class WorkActivityCoordinator:
                 await self._emit_progress_canvas(state, phase="Review", progress=92, force=True)
 
     async def _on_provider_result(self, _method: str, params: dict[str, Any]) -> None:
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
         run_id = str(params.get("run_id") or "").strip()
         state = self._run_state(params)
         state["status"] = str(params.get("status") or state.get("status") or "")
-        state["result"] = str(params.get("result") or state.get("result") or "")
-        state["error"] = str(params.get("error") or state.get("error") or "")
-        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+        if "result" in params:
+            state["result"] = str(params.get("result") or "")
+        if "error" in params:
+            state["error"] = str(params.get("error") or "")
         state["metadata"] = self._merge_run_metadata(state.get("metadata"), metadata)
         metadata = state["metadata"]
+        if str(state.get("status") or "").strip().lower() == "orphaned":
+            # No local worker remains to animate, but this is not a terminal
+            # result and must not render a 100%-complete result report or mint
+            # terminal narration. The Work read model owns its Needs-attention
+            # projection until reconciliation supplies a definite outcome.
+            state["liveness"] = "orphaned"
+            await self._leave_work(run_id, reason="provider.result:orphaned")
+            return
         cancellation = (
             metadata.get("cancellation")
             if isinstance(metadata.get("cancellation"), dict)
@@ -831,6 +841,7 @@ class WorkActivityCoordinator:
         state["semantic_explicit"] = fact.explicit
         state["semantic_verified"] = fact.verified
         state["semantic_milestone"] = fact.milestone
+        state["semantic_evidence"] = fact.evidence
         return True
 
     @staticmethod
@@ -1186,6 +1197,8 @@ class WorkActivityCoordinator:
         *,
         provider_ended: bool = False,
     ) -> None:
+        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        native_permission = bool(str(metadata.get("cooperative_context_id") or "").strip())
         provider_label = self._provider_display_label(str(state.get("provider") or "provider"))
         action = str(permission.get("action") or "").strip()
         capability = str(permission.get("capability") or "").strip()
@@ -1253,7 +1266,11 @@ class WorkActivityCoordinator:
         canvas["permissionRequest"] = dict(permission)
         state["last_canvas_at"] = time.monotonic()
         state["last_progress"] = int(canvas.get("progress") or 72)
-        await bus.emit(Method.WALLPAPER_CANVAS, canvas)
+        # The native permission owner publishes the durable request identity.
+        # Keep the old semantic narration, but do not overwrite its Slice card
+        # with an anonymous Work permission shell.
+        if not native_permission:
+            await bus.emit(Method.WALLPAPER_CANVAS, canvas)
         await self._emit_work_note(
             state,
             phase="Checkpoint",
@@ -1495,8 +1512,23 @@ class WorkActivityCoordinator:
                 {
                     "narration_keypoint": narration_keypoint,
                     **(
-                        {"semantic_milestone": str(state.get("semantic_milestone") or "")}
-                        if semantic and state.get("semantic_milestone")
+                        {
+                            **(
+                                {
+                                    "semantic_milestone": str(
+                                        state.get("semantic_milestone") or ""
+                                    )
+                                }
+                                if state.get("semantic_milestone")
+                                else {}
+                            ),
+                            "semantic_source": str(state.get("semantic_source") or ""),
+                            "semantic_verified": state.get("semantic_verified") is True,
+                            "semantic_evidence": str(
+                                state.get("semantic_evidence") or "reported"
+                            ),
+                        }
+                        if semantic and not semantic_candidate
                         else {}
                     ),
                     **(
@@ -1951,6 +1983,11 @@ class WorkActivityCoordinator:
             # never announce the predecessor as the task's final failure even
             # when the legacy global ownership switch is disabled.
             return True
+        if isinstance(metadata.get("host_auip_bundle_validation"), dict):
+            # AUIP terminal truth includes Host-owned static and real boot
+            # validation. The ledger must present that result, including a
+            # bounded repair successor or a concrete environment blocker.
+            return True
         if isinstance(metadata.get("export_plan"), dict):
             return True
         return bool(getattr(_settings, "WORK_LEDGER_OWNS_TERMINAL_NARRATION", False))
@@ -2001,9 +2038,11 @@ class WorkActivityCoordinator:
                     label="report" if semantic else "stream",
                     text=self._trim(text, 110),
                     detail=(
-                        "provider update; not terminal"
+                        "reported direction; not verified"
                         if semantic_candidate
-                        else "semantic"
+                        else "Host-observed semantic evidence"
+                        if semantic and state.get("semantic_verified") is True
+                        else "provider-reported semantic evidence; not verified"
                         if semantic
                         else "streaming"
                     ),
@@ -2185,11 +2224,17 @@ class WorkActivityCoordinator:
         observer_policy: str = "auto",
         metadata_extra: dict[str, Any] | None = None,
     ) -> None:
+        metadata = dict(state.get("metadata") if isinstance(state.get("metadata"), dict) else {})
+        if str(metadata.get("cooperative_context_id") or "").strip():
+            # Keep ordinary progress on the established narration path. The
+            # native role owns only the terminal result, so do not narrate it twice.
+            if str(phase or "").strip().lower() == "result":
+                state["release_owned_by_observer"] = True
+                return
         policy = str(observer_policy or "auto").strip().lower()
         phase_text = str(phase or "").strip().lower()
         if policy != "silent" and phase_text == "result":
             state["release_owned_by_observer"] = True
-        metadata = dict(state.get("metadata") if isinstance(state.get("metadata"), dict) else {})
         if metadata_extra:
             metadata.update(metadata_extra)
         note = work_note_payload(

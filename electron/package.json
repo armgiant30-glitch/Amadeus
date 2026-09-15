@@ -1,11 +1,12 @@
 {
   "name": "amadeus-desktop",
-  "version": "0.1.0",
+  "version": "0.15.0-alpha.0",
   "description": "Amadeus AI Companion — Electron frontend",
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
     "postinstall": "install-electron",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron . --disable-gpu-sandbox\"",

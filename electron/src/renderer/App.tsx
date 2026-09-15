@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useBackend } from './hooks/useBackend'
 import Sidebar from './components/Sidebar'
 import ChatPage from './components/ChatPage'
@@ -104,6 +104,7 @@ function AmadeusApp() {
   const handleToggleWallpaper = useCallback(async () => {
     const next = !wallpaperActive
     setPage('chat')
+    setWallpaperActive(next)
 
     if (next) {
       if (renderActive) {
@@ -114,10 +115,10 @@ function AmadeusApp() {
       }
       try {
         const res = await send('wallpaper.start', ELECTRON_SLICE_START_PARAMS)
-        setWallpaperActive(res?.status !== 'error')
-        if (res?.status !== 'error') await syncElectronSliceHost(res)
+        if (res?.status === 'error') setWallpaperActive(false)   // 失败回退
+        else await syncElectronSliceHost(res)
       } catch {
-        setWallpaperActive(false)
+        setWallpaperActive(false)     // 失败回退
       }
     } else {
       try { await send('wallpaper.stop', {}) } catch {}
@@ -149,6 +150,25 @@ function AmadeusApp() {
     })
     return () => { unsubReady(); unsubExited() }
   }, [desktopProjection, subscribe])
+
+  // Auto-start wallpaper if requested via query parameter (e.g. on system boot)
+  const autoStartWallpaper = searchParams.get('wallpaper') === '1'
+  const autoStartDoneRef = useRef(false)
+  useEffect(() => {
+    if (desktopProjection || !connected || !autoStartWallpaper || autoStartDoneRef.current) return
+    autoStartDoneRef.current = true
+    void (async () => {
+      try {
+        const res = await send('wallpaper.start', ELECTRON_SLICE_START_PARAMS)
+        if (res?.status !== 'error') {
+          setWallpaperActive(true)
+          await syncElectronSliceHost(res)
+        }
+      } catch (err) {
+        console.error('[wallpaper] auto-start failed:', err)
+      }
+    })()
+  }, [autoStartWallpaper, connected, desktopProjection, send])
 
   useEffect(() => {
     if (desktopProjection) return

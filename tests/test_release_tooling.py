@@ -210,6 +210,25 @@ def test_archive_is_deterministic(tmp_path: Path) -> None:
         ]
 
 
+def test_source_release_keeps_the_linux_aec_path_dependency() -> None:
+    policy = json.loads((ROOT / "release/source_release_policy.json").read_text(encoding="utf-8"))
+    manifest = json.loads((ROOT / "LICENSES/provenance.json").read_text(encoding="utf-8"))
+    required = [
+        "vendor/aec-audio-processing/setup.py",
+        "vendor/aec-audio-processing/pyproject.toml",
+        "vendor/aec-audio-processing/LICENSE",
+        "vendor/aec-audio-processing/src/files/THIRD_PARTY_NOTICES.txt",
+        "vendor/aec-audio-processing/webrtc-audio-processing/meson.build",
+        "vendor/aec-audio-processing/webrtc-audio-processing/subprojects/abseil-cpp-20240722.0/LICENSE",
+        "vendor/aec-audio-processing.PROVENANCE.md",
+        "vendor/aec-audio-processing.patch",
+    ]
+    selected, excluded = select_paths(required, policy)
+    assert selected == sorted(required)
+    assert excluded == []
+    assert release_blockers_for_paths(manifest, selected) == []
+
+
 def test_current_source_policy_has_no_selected_provenance_blockers() -> None:
     policy_path = ROOT / "release" / "source_release_policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
@@ -305,5 +324,5 @@ def test_first_party_brand_assets_are_release_ready() -> None:
         component = components[component_id]
         assert component["release_action"] == "include"
         assert component["gate_status"] == "ready"
-        assert component["license_expression"] == "PolyForm-Noncommercial-1.0.0"
+        assert component["license_expression"] == "AGPL-3.0"
         assert "LICENSES/FIRST-PARTY-BRAND-ASSETS.md" in component["license_evidence"]

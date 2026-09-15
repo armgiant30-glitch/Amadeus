@@ -25,10 +25,11 @@ from agent_host.provider_progress import (
     with_progress_contract,
 )
 from agent_host.provider_authoring import (
+    required_auip_engagement_mode,
     requires_auip_authoring,
     with_host_authoring_capabilities,
 )
-from agent_host.provider_identity import with_main_role_reference
+from agent_host.provider_identity import with_parent_conversation_context
 from agent_host.mcp_connections import (
     McpConnectionSpec,
     codex_mcp_config_overrides,
@@ -287,23 +288,18 @@ class DirectCodexAdapter:
                 process,
                 with_progress_contract(
                     with_host_authoring_capabilities(
-                        with_main_role_reference(
+                        with_parent_conversation_context(
                             request.task,
                             metadata=request.metadata,
                             execution_provider=self.provider_id,
                         ),
-                        source_user_text=str(
-                            (request.metadata or {}).get("source_user_text") or ""
-                        ),
-                        source_user_context=str(
-                            (request.metadata or {}).get("source_user_context") or ""
-                        ),
-                        require_auip_preparation=requires_auip_authoring(
-                            (request.metadata or {}).get("source")
-                        ),
+                        require_auip_preparation=requires_auip_authoring(request.metadata or {}),
                         authoring_skill_path=str(
                             (request.metadata or {}).get("auip_authoring_skill_path")
                             or ""
+                        ),
+                        required_auip_mode=required_auip_engagement_mode(
+                            request.metadata or {}
                         ),
                     ),
                     presentation_locale=(request.metadata or {}).get("presentation_locale"),

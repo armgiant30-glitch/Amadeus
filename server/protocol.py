@@ -40,8 +40,13 @@ class Method(StrEnum):
     # Chat
     CHAT_SEND          = "chat.send"
     CHAT_ABORT         = "chat.abort"
+    CHAT_PERMISSION_RESOLVE = "chat.permission.resolve"
+    CHAT_TRANSLATE     = "chat.translate"
+    CHAT_USER          = "chat.user"
     CHAT_TOKEN         = "chat.token"
     CHAT_COMPLETE      = "chat.complete"
+    CHAT_ROLE_MESSAGE  = "chat.role_message"
+    CHAT_ROLE_RECEIVED = "chat.role_received"
     CHAT_ERROR         = "chat.error"
     CHAT_INTERRUPTED   = "chat.interrupted"
     CHAT_WORK_NOTE     = "chat.work_note"
@@ -177,6 +182,8 @@ class Method(StrEnum):
     WORK_LIST           = "work.list"
     WORK_GET            = "work.get"
     WORK_START          = "work.start"
+    WORK_INPUT          = "work.input"
+    WORK_INPUT_UPDATED  = "work.input.updated"
     WORK_FOCUS          = "work.focus"
     WORK_CONTINUE       = "work.continue"
     WORK_RETRY          = "work.retry"
@@ -259,6 +266,10 @@ class ChatTokenParams(TypedDict):
 class ChatCompleteParams(TypedDict):
     turn_id: str
     full_text: str
+
+class ChatTranslateParams(TypedDict):
+    text: str
+    turn_id: NotRequired[str]
 
 class TtsSetModeParams(TypedDict):
     mode: str                # "gpt_sovits" | "edge" | ...

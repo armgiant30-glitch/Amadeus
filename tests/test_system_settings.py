@@ -11,6 +11,7 @@ from server.handlers.system_handler import (
     SystemHandler,
     _avatar_configuration,
     _model_connections,
+    _model_role_configuration,
     _voice_configuration,
     _work_provider_configuration,
 )
@@ -49,6 +50,27 @@ def test_settings_connection_descriptors_never_return_secret_values() -> None:
         "TTS_API_KEY",
         "MIMO_TTS_API_KEY",
     }
+
+
+def test_settings_exposes_default_b2_as_needing_setup_without_action_model() -> None:
+    from config import settings
+
+    with (
+        patch.object(settings, "AUIP_APPSESSION_ROLE_BRANCH_MODE", "b2"),
+        patch.object(settings, "AUIP_CONTROL_DECISION_ENABLED", True),
+        patch(
+            "server.auip_b2_role_llm.has_b2_role_model_config",
+            return_value=False,
+        ),
+    ):
+        roles = {group["id"]: group for group in _model_role_configuration(settings)}
+
+    action = roles["auip_action"]
+    assert action["active"] is True
+    assert action["configured"] is False
+    assert action["status"] == "needs_setup"
+    assert action["status_ok"] is False
+    assert "Application actions remain blocked" in action["status_detail"]
 
 
 def test_deepseek_main_model_is_an_independent_editable_startup_field() -> None:
@@ -176,6 +198,37 @@ def test_system_settings_report_optional_visual_asset_pack_status() -> None:
     asyncio.run(run())
 
 
+def test_cooperative_settings_preserve_all_existing_role_backend_choices() -> None:
+    async def run() -> None:
+        from config import settings
+        import llm.client as llm_client
+        from core.chat_runtime import get_chat_runtime
+
+        handler = SystemHandler()
+        runtime = get_chat_runtime()
+        old_provider = runtime.provider
+        with (
+            patch.object(settings, "COOPERATIVE_CHAT_ENABLED", True),
+            patch.object(llm_client, "LLM_PROVIDER", "deepseek"),
+            patch("server.handlers.system_handler.bus.emit", new=AsyncMock()),
+        ):
+            try:
+                result = await handler._get_config({})
+                assert result["llm_provider"] == "deepseek"
+                assert result["cooperative_chat_input_capabilities"] == {
+                    "typed_text":True, "confirmed_transcript_text":True,
+                    "visual_attachment":True, "speculative_voice":False,
+                    "physical_voice_validated":False}
+                changed = await handler._set_config(
+                    {"values":{"llm_provider":"gemini"}})
+                assert changed["values"]["llm_provider"] == "gemini"
+                assert runtime.provider == "gemini"
+            finally:
+                runtime.set_provider(old_provider)
+
+    asyncio.run(run())
+
+
 def test_voice_settings_keep_wake_and_conversation_recognition_independent() -> None:
     from config import settings
 
@@ -238,6 +291,9 @@ def test_mimo_desktop_settings_persist_values_and_encrypt_the_key() -> None:
 
 
 def test_voice_settings_publish_microphone_choices_without_recording_audio() -> None:
+    import pytest
+
+    pytest.importorskip("pyaudio", reason="voice tier (pyaudio) is not installed")
     from asr.microphone import MicDeviceDescriptor
     from config import settings
 
@@ -321,7 +377,7 @@ def test_system_settings_reject_llm_routing_change_during_active_chat() -> None:
         handler = SystemHandler()
         handler.configure(is_chat_busy=lambda: True)
         with pytest.raises(RuntimeError, match="active chat turn"):
-            await handler._set_config({"values": {"llm_provider": "local"}})
+            await handler._set_config({"values": {"llm_provider": "openai"}})
 
     asyncio.run(run())
 
@@ -396,9 +452,6 @@ def test_local_model_settings_show_only_the_selected_compatibility_profile() -> 
         "LOCAL_LLM_TYPE",
         "LOCAL_LLM_MODEL",
         "LOCAL_LLM_OLLAMA_URL",
-        "RAG_ENABLED_FOR_LOCAL",
-        "RAG_TOP_K",
-        "RAG_MAX_DISTANCE",
     }
     assert groups["local"]["active"] is True
     assert groups["hybrid_local"]["active"] is False
@@ -438,6 +491,7 @@ def test_runtime_provider_switch_keeps_managed_llama_server_lifecycle_aligned() 
             settings.LOCAL_LLM_LAUNCH_MODE = "managed"
             runtime.set_local_llm_type("llama_server")
             with (
+                patch.object(settings, "COOPERATIVE_CHAT_ENABLED", False),
                 patch("server.handlers.system_handler.bus.emit", new=AsyncMock()),
                 patch("llm.llama_server.start_llama_server", new=start),
                 patch("llm.llama_server.warmup_local_llm_cache", new=warmup),

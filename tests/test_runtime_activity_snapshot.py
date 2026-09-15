@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config.settings as settings
 from _support import settle_provider_runs
 from agent_host.provider_contract import ProviderCapabilities, ProviderManifest
+from agent_host.provider_identity import PARENT_CONTEXT_DELIVERED_EVENT
 from agent_host.provider_runtime import ProviderRuntime
 from agent_host.provider_types import ProviderRunRequest, ProviderRunResult
 from agent_host.work_ledger_store import WorkLedgerConflict, WorkLedgerStore
@@ -28,6 +29,7 @@ from server.work_activity_snapshot import (
     activity_report_fields,
     project_activity_event,
     project_activity_result,
+    is_material_activity_event,
 )
 from server.work_ledger_coordinator import WorkLedgerCoordinator
 from server.work_export_service import WorkExportService
@@ -109,6 +111,8 @@ def test_activity_projection_is_monotonic_and_preserves_control_facts() -> None:
     assert snapshot["lastEventAt"] == 1_315.0
     assert snapshot["lastSemanticProgressAt"] == 1_010.0
 
+    assert is_material_activity_event(PARENT_CONTEXT_DELIVERED_EVENT) is False
+
     stale = project_activity_event(
         snapshot,
         _event(4, "semantic.progress", {"summary": "stale"}, at=1_400.0),
@@ -116,7 +120,6 @@ def test_activity_projection_is_monotonic_and_preserves_control_facts() -> None:
         now=1_400.0,
     )
     assert stale == snapshot
-
     recovered = project_activity_event(
         snapshot,
         _event(
@@ -141,6 +144,24 @@ def test_activity_projection_is_monotonic_and_preserves_control_facts() -> None:
     )
     assert late["phase"] == "review"
     print("ok: activity events project monotonically with liveness and steer facts")
+
+
+def test_context_delivery_receipt_does_not_create_visible_work_activity() -> None:
+    async def scenario() -> None:
+        coordinator = WorkActivityCoordinator()
+        await coordinator._on_provider_event(
+            Method.PROVIDER_EVENT,
+            {
+                "provider": "codex",
+                "run_id": "run-context-only",
+                "type": PARENT_CONTEXT_DELIVERED_EVENT,
+                "metadata": {"source_user_text": "private handoff evidence"},
+            },
+        )
+        assert coordinator._runs == {}
+        assert coordinator._active_runs == set()
+
+    asyncio.run(scenario())
 
 
 def test_dynamic_activity_time_is_computed_at_read_time() -> None:
@@ -170,6 +191,54 @@ def test_dynamic_activity_time_is_computed_at_read_time() -> None:
     assert legacy_terminal["activity_phase"] == "review"
     assert legacy_terminal["activity_uncertainty"] == ""
     print("ok: elapsed and silence are materialised without periodic ledger writes")
+
+
+def test_orphaned_activity_stays_nonterminal_until_reconciled() -> None:
+    working = {
+        "phase": "working",
+        "revision": 3,
+        "startedAt": 1_000.0,
+        "latestSemanticSummary": "The workspace mutation may have started.",
+    }
+    from_status = project_activity_event(
+        working,
+        _event(4, "run.status", {"status": "orphaned"}, at=1_020.0),
+        execution_status="orphaned",
+        now=1_020.0,
+    )
+    assert from_status["phase"] == "orphaned"
+    assert from_status["uncertainty"] == "native_outcome_unknown"
+    assert "finishedAt" not in from_status
+
+    orphaned = project_activity_result(
+        from_status,
+        status="orphaned",
+        observed_at=1_025.0,
+    )
+    assert orphaned["phase"] == "orphaned"
+    assert orphaned["uncertainty"] == "native_outcome_unknown"
+    assert "finishedAt" not in orphaned
+
+    restored = activity_report_fields(
+        {"phase": "working"},
+        execution_status="orphaned",
+        created_at=1_000.0,
+        started_at=1_005.0,
+        finished_at=None,
+        now=1_030.0,
+    )
+    assert restored["activity_phase"] == "orphaned"
+    assert restored["activity_uncertainty"] == "native_outcome_unknown"
+
+    reconciled = project_activity_result(
+        orphaned,
+        status="succeeded",
+        observed_at=1_040.0,
+    )
+    assert reconciled["phase"] == "review"
+    assert reconciled["finishedAt"] == 1_040.0
+    assert reconciled["uncertainty"] == ""
+    assert reconciled["liveness"]["state"] == "terminal"
 
 
 def test_retrospective_permission_is_denied_activity_not_waiting_for_user() -> None:
@@ -319,6 +388,127 @@ def test_verified_tool_fact_advances_semantic_clock_once() -> None:
     assert result["semanticSource"] == "host.tool_observation"
     assert result["semanticVerified"] is True
     assert result["lastSemanticProgressAt"] == 5_010.0
+
+
+def test_status_query_tracks_the_current_steer_evidence_end_to_end() -> None:
+    snapshot = project_activity_event(
+        {},
+        _event(1, "run.created", at=10.0),
+        execution_status="running",
+        now=10.0,
+    )
+    snapshot = project_activity_event(
+        snapshot,
+        _event(
+            2,
+            "semantic.progress",
+            {
+                "milestone": "design",
+                "summary": "I will implement the old one-player design.",
+                "source": "provider_explicit_progress",
+                "verified": False,
+            },
+            at=12.0,
+        ),
+        execution_status="running",
+        now=12.0,
+    )
+    snapshot = project_activity_event(
+        snapshot,
+        _event(
+            3,
+            "run.status",
+            {
+                "status": "running",
+                "stage": "steer_queued",
+                "revision": 1,
+                "replaces_revision": 0,
+            },
+            at=20.0,
+        ),
+        execution_status="running",
+        now=20.0,
+    )
+
+    def status_note(current: dict, *, now: float) -> dict:
+        fields = activity_report_fields(
+            current,
+            execution_status="running",
+            created_at=10.0,
+            started_at=10.0,
+            finished_at=None,
+            now=now,
+        )
+        return task_lookup.status_query_narration_note(
+            {
+                "work_item_id": "work-steer-freshness",
+                "attempt_id": "attempt-steer-freshness",
+                "title": "Build the game",
+                "execution": "running",
+                "completion": "unknown",
+                "attention": "none",
+                **fields,
+            }
+        )
+
+    stale = status_note(snapshot, now=21.0)
+    assert stale["metadata"]["semantic_milestone"] == ""
+    assert stale["metadata"]["status_facts"]["steering_revision"] == 1
+
+    snapshot = project_activity_event(
+        snapshot,
+        _event(
+            4,
+            "semantic.progress",
+            {
+                "milestone": "capability",
+                "summary": "The two-player controls are wired.",
+                "source": "provider_explicit_progress",
+                "verified": False,
+            },
+            at=30.0,
+        ),
+        execution_status="running",
+        now=30.0,
+    )
+    reported = status_note(snapshot, now=31.0)
+    assert reported["metadata"]["semantic_milestone"] == "capability"
+    assert reported["metadata"]["status_facts"]["fact_verified"] is False
+
+    snapshot = project_activity_event(
+        snapshot,
+        _event(
+            5,
+            "tool.call",
+            {
+                "tool": "command_execution",
+                "item_id": "validation-1",
+                "command": "python -m pytest tests/test_game.py",
+            },
+            at=40.0,
+        ),
+        execution_status="running",
+        now=40.0,
+    )
+    snapshot = project_activity_event(
+        snapshot,
+        _event(
+            6,
+            "tool.result",
+            {
+                "item_id": "validation-1",
+                "success": True,
+                "status": "completed",
+            },
+            at=41.0,
+        ),
+        execution_status="running",
+        now=41.0,
+    )
+    observed = status_note(snapshot, now=42.0)
+    assert observed["metadata"]["semantic_milestone"] == "validation"
+    assert observed["metadata"]["status_facts"]["fact_verified"] is True
+    assert observed["summary"] == "Project validation passed."
 
 
 def test_repeated_permission_fact_does_not_reset_clock_after_other_progress() -> None:
@@ -582,7 +772,8 @@ def test_confirmed_cancel_restarts_same_work_item_with_lineage() -> None:
 
             bus.on(Method.CHAT_WORK_NOTE, capture)
             try:
-                with patch.object(settings, "WORK_LEDGER_OWNS_TERMINAL_NARRATION", True):
+                with (patch.object(settings, "WORK_LEDGER_OWNS_TERMINAL_NARRATION", True),
+                      patch.object(settings, "WORK_PROJECT_ALLOWLIST", str(workspace))):
                     first = await runtime.start(_replacement_request(workspace))
                     await asyncio.wait_for(adapter.started_event.wait(), timeout=2.0)
                     binding = dict(first.metadata["work"])
@@ -756,6 +947,77 @@ def test_replacement_predecessor_has_no_terminal_activity_report() -> None:
     print("ok: replacement predecessor event and result stay silent in WorkActivity")
 
 
+def test_orphaned_result_releases_local_activity_without_terminal_report() -> None:
+    async def run() -> None:
+        activity = WorkActivityCoordinator()
+        canvases: list[dict] = []
+        notes: list[dict] = []
+
+        async def capture_canvas(_method: str, params: dict) -> None:
+            canvases.append(params)
+
+        async def capture_note(_method: str, params: dict) -> None:
+            notes.append(params)
+
+        bus.on(Method.WALLPAPER_CANVAS, capture_canvas)
+        bus.on(Method.CHAT_WORK_NOTE, capture_note)
+        try:
+            activity._active_runs.add("unknown-run")
+            await activity._on_provider_result(
+                Method.PROVIDER_RESULT,
+                {
+                    "provider": "codex",
+                    "run_id": "unknown-run",
+                    "status": "orphaned",
+                    "result": "",
+                    "error": "native submission acknowledgement is unknown",
+                    "metadata": {
+                        "session_id": "unknown-session",
+                        "work": {
+                            "work_item_id": "unknown-work",
+                            "attempt_id": "unknown-attempt",
+                        },
+                    },
+                },
+            )
+            assert activity._runs["unknown-run"]["status"] == "orphaned"
+            assert "unknown-run" not in activity._active_runs
+            assert canvases == []
+            assert notes == []
+
+            with patch.object(activity, "_schedule_observer_release_fallback"):
+                await activity._on_provider_result(
+                    Method.PROVIDER_RESULT,
+                    {
+                        "provider": "codex",
+                        "run_id": "unknown-run",
+                        "status": "succeeded",
+                        "result": "",
+                        "error": "",
+                        "metadata": {
+                            "session_id": "unknown-session",
+                            "work": {
+                                "work_item_id": "unknown-work",
+                                "attempt_id": "unknown-attempt",
+                            },
+                        },
+                    },
+                )
+            assert activity._runs["unknown-run"]["status"] == "succeeded"
+            assert activity._runs["unknown-run"]["result"] == ""
+            assert activity._runs["unknown-run"]["error"] == ""
+            assert len(canvases) == 1
+            assert canvases[0]["phase"] == "Result"
+            assert canvases[0]["progress"] == 100
+            assert notes == []
+        finally:
+            bus.off(Method.WALLPAPER_CANVAS, capture_canvas)
+            bus.off(Method.CHAT_WORK_NOTE, capture_note)
+
+    asyncio.run(run())
+    print("ok: unknown outcome stays nonterminal on the presentation surface")
+
+
 def test_provider_snapshot_projection_is_burst_coalesced() -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory(prefix="projection_coalesce_") as temp:
@@ -893,6 +1155,7 @@ def main() -> None:
     test_retrospective_permission_is_denied_activity_not_waiting_for_user()
     test_mechanical_events_do_not_reset_semantic_silence()
     test_verified_tool_fact_advances_semantic_clock_once()
+    test_status_query_tracks_the_current_steer_evidence_end_to_end()
     test_repeated_permission_fact_does_not_reset_clock_after_other_progress()
     test_staging_observation_is_bounded_to_the_attempt_namespace()
     test_report_refresh_combines_durable_activity_with_live_git_facts()

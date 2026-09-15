@@ -8,11 +8,22 @@ import logging
 import tempfile
 import traceback
 import numpy as np
+from contextlib import nullcontext
 from pathlib import Path
 import string
 from string import punctuation
 
+from config.local_model_loading import enforce_local_model_loading
+
+# Apply before importing model code, including when Hub/Transformers were
+# already imported by another optional component in the same process.
+enforce_local_model_loading()
+
 from tts.optional_ap_bwe import APBWEUnavailable, create_ap_bwe
+from tts.semantic_stability import (
+    SemanticGenerationError,
+    assess_semantic_candidate,
+)
 
 
 def _iter_segment_text_lang(text: str):
@@ -53,6 +64,16 @@ def _default_ref_free_prompt() -> str:
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('tts_inference')
+
+
+def _uses_torch_cuda_device_api(device_name: str) -> bool:
+    """Return whether the device is addressed through torch.cuda (CUDA or HIP)."""
+    return device_name.startswith("cuda") and torch.cuda.is_available()
+
+
+def _allows_nvidia_cuda_extensions(uses_torch_cuda_api: bool) -> bool:
+    """NVIDIA CUDA extensions are incompatible with PyTorch ROCm/HIP builds."""
+    return uses_torch_cuda_api and not bool(getattr(torch.version, "hip", None))
 
 # 获取当前项目根目录
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -117,7 +138,21 @@ class TTSInferencer:
             base_dir = root_dir
             self.device = device
             device_name = str(device).lower()
-            self.is_half = torch.cuda.is_available() and device_name.startswith("cuda")
+            self._uses_torch_cuda_api = _uses_torch_cuda_device_api(device_name)
+            self._allows_nvidia_cuda_extensions = _allows_nvidia_cuda_extensions(
+                self._uses_torch_cuda_api
+            )
+            if device_name.startswith("cuda") and not self._uses_torch_cuda_api:
+                raise RuntimeError(
+                    f"TTS device {device!r} requires a usable PyTorch CUDA/HIP device"
+                )
+            if device_name.startswith("mps") and not (
+                hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+            ):
+                raise RuntimeError(
+                    f"TTS device {device!r} requires an available PyTorch MPS backend"
+                )
+            self.is_half = self._uses_torch_cuda_api
 
             # CUDA device index — used to set the current CUDA device before custom
             # CUDA kernel calls (BigVGAN's fused anti-alias activation), which rely on
@@ -201,29 +236,140 @@ class TTSInferencer:
         return effective
 
     def _sync_t2s_timing(self):
-        if self.is_half and str(self.device).lower().startswith("cuda") and torch.cuda.is_available():
-            with torch.cuda.device(self._tts_device_idx):
-                torch.cuda.synchronize()
+        self._synchronize_device()
 
     def _sync_sovits_timing(self):
-        if str(self.device).lower().startswith("cuda") and torch.cuda.is_available():
+        self._synchronize_device()
+
+    def _device_context(self):
+        if self._uses_torch_cuda_api:
+            return torch.cuda.device(self._tts_device_idx)
+        return nullcontext()
+
+    def _synchronize_device(self):
+        if self._uses_torch_cuda_api:
             with torch.cuda.device(self._tts_device_idx):
                 torch.cuda.synchronize()
+        elif str(self.device).lower().startswith("mps"):
+            torch.mps.synchronize()
 
-    def _record_t2s_stat(self, text_item: str, tokens: int, elapsed_sec: float):
+    def _record_t2s_stat(
+        self,
+        text_item: str,
+        tokens: int,
+        elapsed_sec: float,
+        attempts: int = 1,
+    ):
         rate = float(tokens) / elapsed_sec if elapsed_sec > 0 else 0.0
         stat = {
             "text": text_item,
             "tokens": int(tokens),
             "elapsed_sec": float(elapsed_sec),
             "tokens_per_sec": rate,
+            "semantic_attempts": int(attempts),
         }
         self.t2s_stats.append(stat)
         logger.info(
             f"[t2s] tokens={stat['tokens']} elapsed={stat['elapsed_sec']:.3f}s "
-            f"speed={stat['tokens_per_sec']:.0f} it/s"
+            f"speed={stat['tokens_per_sec']:.0f} it/s attempts={stat['semantic_attempts']}"
         )
         return stat
+
+    @staticmethod
+    def _semantic_guard_enabled() -> bool:
+        raw = os.environ.get("TTS_SEMANTIC_GUARD", "1")
+        return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _infer_semantic_with_guard(
+        self,
+        *,
+        text_item: str,
+        target_phone_count: int,
+        all_phoneme_ids,
+        all_phoneme_len,
+        prompt,
+        bert,
+        top_k,
+        top_p,
+        temperature,
+        effective_max_sec: float,
+        enable_cuda_graph: bool,
+        enable_static_kv: bool,
+    ):
+        """Generate one admissible semantic candidate before SoVITS decoding.
+
+        The normal path performs exactly one unchanged 1.35-penalty decode.  A
+        structurally collapsed candidate is logged, discarded, and sampled one
+        more time with a modestly stronger repetition penalty.  If both bounded
+        attempts collapse, no vocoder work is performed and the caller fails
+        closed instead of emitting a long corrupt waveform.
+        """
+
+        max_generation_tokens = int(self.hz * effective_max_sec)
+        guard_enabled = self._semantic_guard_enabled()
+        penalties = (1.35, 1.5) if guard_enabled else (1.35,)
+        last_assessment = None
+
+        for attempt, repetition_penalty in enumerate(penalties, start=1):
+            prediction, idx = self.t2s_model.model.infer_panel(
+                all_phoneme_ids,
+                all_phoneme_len,
+                prompt,
+                bert,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                early_stop_num=max_generation_tokens,
+                enable_cuda_graph=enable_cuda_graph,
+                enable_static_kv=enable_static_kv,
+            )
+            generated_count = max(0, int(idx))
+            if generated_count:
+                candidate = prediction[:, -generated_count:]
+            else:
+                candidate = prediction[:, :0]
+
+            if not guard_enabled:
+                return candidate.unsqueeze(0), generated_count, attempt
+
+            tokens = candidate.detach().reshape(-1).cpu().long().tolist()
+            assessment = assess_semantic_candidate(
+                tokens,
+                target_phone_count=target_phone_count,
+                max_generation_tokens=max_generation_tokens,
+            )
+            last_assessment = assessment
+            if assessment.accepted:
+                if attempt > 1:
+                    logger.info(
+                        "[T2S guard] retry recovered text=%r tokens=%d penalty=%.2f",
+                        text_item[:80],
+                        assessment.token_count,
+                        repetition_penalty,
+                    )
+                return candidate.unsqueeze(0), generated_count, attempt
+
+            logger.warning(
+                "[T2S guard] rejected attempt=%d/%d text=%r reasons=%s "
+                "tokens=%d budget=%d equal_run=%d periodic_run=%d top_ratio=%.3f",
+                attempt,
+                len(penalties),
+                text_item[:80],
+                ",".join(assessment.reasons),
+                assessment.token_count,
+                assessment.soft_token_budget,
+                assessment.longest_equal_run,
+                assessment.longest_periodic_run,
+                assessment.top_token_ratio,
+            )
+
+        detail = "unknown"
+        if last_assessment is not None:
+            detail = ",".join(last_assessment.reasons) or "rejected"
+        raise SemanticGenerationError(
+            f"semantic generation collapsed after {len(penalties)} attempts: {detail}"
+        )
 
     def _resolve_runtime_warmup_ref(self):
         lang = _default_lang_code()
@@ -352,8 +498,8 @@ class TTSInferencer:
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
         logger.info(f"Loading BERT model: {self.bert_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.bert_path)
-        self.bert_model = AutoModelForMaskedLM.from_pretrained(self.bert_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.bert_path, local_files_only=True)
+        self.bert_model = AutoModelForMaskedLM.from_pretrained(self.bert_path, local_files_only=True)
 
         if self.is_half:
             self.bert_model = self.bert_model.half().to(self.device)
@@ -389,7 +535,7 @@ class TTSInferencer:
         """加载GPT模型"""
 
         logger.info(f"Loading GPT model: {self.gpt_path}")
-        dict_s1 = torch.load(self.gpt_path, map_location="cpu")
+        dict_s1 = torch.load(self.gpt_path, map_location="cpu", weights_only=True)
         self.gpt_config = dict_s1["config"]
         self.hz = 50  # 默认值
         self.max_sec = self.gpt_config["data"]["max_sec"]
@@ -601,10 +747,10 @@ class TTSInferencer:
                 / "anti_alias_activation_cuda.pyd"
             )
             _use_cuda_kernel = False
-            if _cuda_pyd.exists():
+            if self._allows_nvidia_cuda_extensions and _cuda_pyd.exists():
                 _use_cuda_kernel = True
                 logger.info("[BigVGAN] compiled CUDA kernel cache found; loading directly")
-            else:
+            elif self._allows_nvidia_cuda_extensions:
                 try:
                     import subprocess as _sp
                     _nvcc = _sp.run(["nvcc", "--version"], capture_output=True, timeout=5)
@@ -613,27 +759,39 @@ class TTSInferencer:
                         logger.info("[BigVGAN] nvcc available; trying to compile the CUDA kernel")
                 except Exception:
                     logger.info("[BigVGAN] nvcc unavailable; using the PyTorch implementation")
+            elif self._uses_torch_cuda_api:
+                logger.info("[BigVGAN] ROCm/HIP device; using the PyTorch implementation")
+            else:
+                logger.info("[BigVGAN] non-CUDA device; using the PyTorch implementation")
 
             kernel_override = os.environ.get("BIGVGAN_USE_CUDA_KERNEL", "").strip().lower()
             if kernel_override in {"0", "false", "off", "no"}:
                 _use_cuda_kernel = False
                 logger.info("[BigVGAN] BIGVGAN_USE_CUDA_KERNEL=0, forcing PyTorch path")
             elif kernel_override in {"1", "true", "on", "yes"}:
-                _use_cuda_kernel = True
-                logger.info("[BigVGAN] BIGVGAN_USE_CUDA_KERNEL=1, forcing CUDA kernel path")
+                if self._allows_nvidia_cuda_extensions:
+                    _use_cuda_kernel = True
+                    logger.info("[BigVGAN] BIGVGAN_USE_CUDA_KERNEL=1, forcing CUDA kernel path")
+                else:
+                    _use_cuda_kernel = False
+                    logger.warning("[BigVGAN] CUDA kernels are unavailable on this TTS device; using PyTorch")
 
             # activation1d.py 在首次 import 时执行模块级 load.load()，
             # 若此时无设备上下文则 CUDA kernel 内部状态绑定到 cuda:0，
             # 之后模型移到 cuda:1 会触发 CUDNN_STATUS_MAPPING_ERROR。
             # 用 torch.cuda.device() 确保 kernel 初始化在正确设备上进行。
             try:
-                with torch.cuda.device(_tts_device_idx):
-                    self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=_use_cuda_kernel)
+                with self._device_context():
+                    self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(
+                        bigvgan_path, use_cuda_kernel=_use_cuda_kernel, local_files_only=True
+                    )
             except Exception as _kernel_err:
                 if _use_cuda_kernel:
                     logger.warning(f"[BigVGAN] CUDA kernel compilation failed; falling back to PyTorch implementation: {_kernel_err}")
-                    with torch.cuda.device(_tts_device_idx):
-                        self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
+                    with self._device_context():
+                        self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(
+                            bigvgan_path, use_cuda_kernel=False, local_files_only=True
+                        )
                 else:
                     raise
             self.bigvgan_model.remove_weight_norm()
@@ -1059,19 +1217,20 @@ class TTSInferencer:
                     # GPT推理
                     logger.info("running GPT inference...")
                     with torch.no_grad():
-                        pred_semantic, idx = self.t2s_model.model.infer_panel(
-                            all_phoneme_ids,
-                            all_phoneme_len,
-                            None if ref_free else prompt,
-                            bert,
+                        pred_semantic, idx, _semantic_attempts = self._infer_semantic_with_guard(
+                            text_item=text_item,
+                            target_phone_count=len(phones2),
+                            all_phoneme_ids=all_phoneme_ids,
+                            all_phoneme_len=all_phoneme_len,
+                            prompt=None if ref_free else prompt,
+                            bert=bert,
                             top_k=top_k,
                             top_p=top_p,
                             temperature=temperature,
-                            early_stop_num=int(self.hz * effective_max_sec),
+                            effective_max_sec=effective_max_sec,
                             enable_cuda_graph=enable_cuda_graph,
                             enable_static_kv=enable_static_kv,
                         )
-                        pred_semantic = pred_semantic[:, -idx:].unsqueeze(0)
                         cache[i_text] = pred_semantic
 
                 # SoVITS推理
@@ -1228,7 +1387,7 @@ class TTSInferencer:
                     # torch.cuda.device() ensures at::cuda::getCurrentCUDAStream()
                     # inside the fused CUDA kernel uses the correct device stream,
                     # preventing CUDNN_STATUS_MAPPING_ERROR on non-default GPUs.
-                    with torch.cuda.device(self._tts_device_idx):
+                    with self._device_context():
                         with torch.inference_mode():
                             wav_gen = self.bigvgan_model(cmf_res)
                             audio = wav_gen[0][0]
@@ -1486,22 +1645,28 @@ class TTSInferencer:
                         if collect_t2s_stats:
                             self._sync_t2s_timing()
                             t2s_start = time.perf_counter()
-                        pred_semantic, idx = self.t2s_model.model.infer_panel(
-                            all_phoneme_ids,
-                            all_phoneme_len,
-                            None if ref_free else prompt,
-                            bert,
+                        pred_semantic, idx, semantic_attempts = self._infer_semantic_with_guard(
+                            text_item=text_item,
+                            target_phone_count=len(phones2),
+                            all_phoneme_ids=all_phoneme_ids,
+                            all_phoneme_len=all_phoneme_len,
+                            prompt=None if ref_free else prompt,
+                            bert=bert,
                             top_k=top_k,
                             top_p=top_p,
                             temperature=temperature,
-                            early_stop_num=int(self.hz * effective_max_sec),
+                            effective_max_sec=effective_max_sec,
                             enable_cuda_graph=enable_cuda_graph,
                             enable_static_kv=enable_static_kv,
                         )
                         if collect_t2s_stats:
                             self._sync_t2s_timing()
-                            self._record_t2s_stat(text_item, idx, time.perf_counter() - t2s_start)
-                        pred_semantic = pred_semantic[:, -idx:].unsqueeze(0)
+                            self._record_t2s_stat(
+                                text_item,
+                                idx,
+                                time.perf_counter() - t2s_start,
+                                attempts=semantic_attempts,
+                            )
                         cache[i_text] = pred_semantic
 
                 # SoVITS推理
@@ -1705,7 +1870,7 @@ class TTSInferencer:
                                 if self._sovits_sync_timing_enabled:
                                     self._sync_sovits_timing()
                                 _t1 = time.perf_counter()
-                                with torch.cuda.device(self._tts_device_idx):
+                                with self._device_context():
                                     with torch.inference_mode():
                                         wav_gen = self.bigvgan_model(chunk_mel)
                                         audio = wav_gen[0][0]
@@ -1762,7 +1927,7 @@ class TTSInferencer:
                             if self._sovits_sync_timing_enabled:
                                 self._sync_sovits_timing()
                             _t1 = time.perf_counter()
-                            with torch.cuda.device(self._tts_device_idx):
+                            with self._device_context():
                                 with torch.inference_mode():
                                     wav_gen = self.bigvgan_model(cmf_res)
                                     audio = wav_gen[0][0]
@@ -1775,8 +1940,7 @@ class TTSInferencer:
                                     cmf_res.shape[2],
                                 ))
                             else:
-                                if str(self.device) != "cpu":
-                                    torch.cuda.synchronize()
+                                self._synchronize_device()
                                 print("[sovits-timing] cfm=%.1fms  bigvgan=%.1fms  mel_T=%s" % (
                                     _t_cfm_total * 1000.0,
                                     (time.perf_counter() - _t1) * 1000.0,

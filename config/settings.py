@@ -11,6 +11,7 @@
 """
 
 import os
+import platform
 from pathlib import Path
 
 from config.environment import load_project_environment
@@ -37,6 +38,11 @@ def _float(key: str, default: float, *, aliases: tuple[str, ...] = ()) -> float:
 
 def _str(key: str, default: str = "", *, aliases: tuple[str, ...] = ()) -> str:
     return _ENV.string(key, default, aliases=aliases)
+
+
+def _secret(key: str, default: str = "", *, aliases: tuple[str, ...] = ()) -> str:
+    """API keys/tokens: tolerate accidental surrounding quotes/whitespace from .env edits."""
+    return _ENV.secret(key, default, aliases=aliases)
 
 
 def declared_environment_fields():
@@ -77,7 +83,7 @@ if LLM_PROVIDER not in LLM_PROVIDERS:
         + ", ".join(sorted(LLM_PROVIDERS))
         + f"; observed {LLM_PROVIDER!r}"
     )
-DEEPSEEK_API_KEY   = _str("DEEPSEEK_API_KEY")
+DEEPSEEK_API_KEY   = _secret("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL  = _str("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL_NAME = _str("DEEPSEEK_MODEL_NAME", "deepseek-v4-flash")
 # ===========================================================================
@@ -94,14 +100,14 @@ QWEN_VL_MODEL_NAME = _str("QWEN_VL_MODEL_NAME", "qwen-vl-max").strip()
 # ===========================================================================
 # LLM 提供商 — OpenAI / GPT
 # ===========================================================================
-OPENAI_API_KEY    = _str("OPENAI_API_KEY")
+OPENAI_API_KEY    = _secret("OPENAI_API_KEY")
 OPENAI_BASE_URL   = _str("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_MODEL_NAME = _str("OPENAI_MODEL_NAME", "gpt-5.4-mini")
 
 # ===========================================================================
 # LLM 提供商 — Gemini
 # ===========================================================================
-GEMINI_API_KEY    = _str("GEMINI_API_KEY")
+GEMINI_API_KEY    = _secret("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = _str("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
 # ===========================================================================
@@ -254,11 +260,15 @@ FIRST_SENTENCE_AUDIO_CACHE_DIR = _str(
 FIRST_SENTENCE_AUDIO_CACHE_MAX_SECONDS = _float("FIRST_SENTENCE_AUDIO_CACHE_MAX_SECONDS", 1.5)
 
 # ===========================================================================
-# RAG（本地 Kurisu 知识库）
+# Optional local retrieval for all Main Chat models (restart required).
+# The retired local-only flag does not authorize sending references remotely.
 # ===========================================================================
-RAG_ENABLED_FOR_LOCAL = _bool("RAG_ENABLED_FOR_LOCAL", False)
-RAG_TOP_K             = _int("RAG_TOP_K", 1)
-RAG_MAX_DISTANCE      = _float("RAG_MAX_DISTANCE", 0.25)
+RAG_ENABLED = _bool("RAG_ENABLED", False)
+RAG_INDEX_DIR = _str("RAG_INDEX_DIR", ".amadeus/character-rag")
+RAG_TOP_K             = _int("RAG_TOP_K", 3)
+RAG_MAX_DISTANCE      = _float("RAG_MAX_DISTANCE", 0.33)
+if RAG_ENABLED and (not 1 <= RAG_TOP_K <= 20 or not 0 <= RAG_MAX_DISTANCE <= 4):
+    raise ValueError("RAG_TOP_K must be 1..20 and RAG_MAX_DISTANCE must be 0..4")
 
 # ===========================================================================
 # VTS（VTube Studio WebSocket）
@@ -274,7 +284,7 @@ VTS_RECONNECT_ENABLED = _bool("VTS_RECONNECT_ENABLED", True)
 # ===========================================================================
 TTS_BACKEND = _str("TTS_BACKEND", "gpt_sovits").strip().lower()
 TTS_API_BASE_URL = _str("TTS_API_BASE_URL", "https://api.openai.com/v1")
-TTS_API_KEY = _str("TTS_API_KEY", "")
+TTS_API_KEY = _secret("TTS_API_KEY", "")
 TTS_API_MODEL = _str("TTS_API_MODEL", "gpt-4o-mini-tts")
 TTS_API_VOICE = _str("TTS_API_VOICE", "alloy")
 TTS_API_STREAM_PROTOCOL = _str("TTS_API_STREAM_PROTOCOL", "buffered").strip().lower()
@@ -282,7 +292,7 @@ TTS_API_TIMEOUT_SECONDS = _float("TTS_API_TIMEOUT_SECONDS", 60.0)
 
 # MiMo TTS（小米远程后端，chat-completions 音频协议，非 /audio/speech）
 MIMO_TTS_BASE_URL = _str("MIMO_TTS_BASE_URL", "https://api.xiaomimimo.com/v1")
-MIMO_TTS_API_KEY = _str("MIMO_TTS_API_KEY", "")
+MIMO_TTS_API_KEY = _secret("MIMO_TTS_API_KEY", "")
 MIMO_TTS_MODEL = _str("MIMO_TTS_MODEL", "mimo-v2.5-tts")
 MIMO_TTS_VOICE = _str("MIMO_TTS_VOICE", "冰糖")
 
@@ -290,8 +300,9 @@ MIMO_TTS_VOICE = _str("MIMO_TTS_VOICE", "冰糖")
 def _resolve_tts_device() -> str:
     """
     自动选择 TTS 设备：
-      - .env / 环境变量明确写了 cuda:0 / cuda:1 / cpu → 直接使用
-      - 未设置 / 写了 "cuda" / 写了 "auto" → 返回 "cuda:0"
+      - .env / 环境变量明确写了 cuda:0 / cuda:1 / mps / cpu → 直接使用
+      - 未设置 / 写了 "cuda" / 写了 "auto" → Apple Silicon 返回 MPS，
+        Intel macOS 返回 CPU，其他平台返回 cuda:0
 
     本地 LLM 的 endpoint 并不能证明它占用了哪张 GPU；多 GPU 分配必须由
     TTS_DEVICE 与 LOCAL_LLM_CUDA_VISIBLE_DEVICES 分别显式声明。
@@ -304,7 +315,10 @@ def _resolve_tts_device() -> str:
     if raw and raw not in ("cuda", "auto"):
         return raw
 
-    device = "cuda:0"
+    if platform.system() == "Darwin":
+        device = "mps" if platform.machine().lower() == "arm64" else "cpu"
+    else:
+        device = "cuda:0"
     # GPT-SoVITS/BigVGAN still reads TTS_DEVICE directly from the process
     # environment, so this compatibility write is part of the current contract.
     os.environ["TTS_DEVICE"] = device
@@ -385,7 +399,7 @@ QWEN3_ASR_REQUIRE_CUDA = _bool("QWEN3_ASR_REQUIRE_CUDA", False)
 # 填入领域热词和指令；SenseVoice 后端会忽略此项
 ASR_CONTEXT = _str("ASR_CONTEXT", "")
 ASR_API_BASE_URL = _str("ASR_API_BASE_URL", "https://api.openai.com/v1")
-ASR_API_KEY = _str("ASR_API_KEY", "")
+ASR_API_KEY = _secret("ASR_API_KEY", "")
 ASR_API_MODEL = _str("ASR_API_MODEL", "gpt-4o-mini-transcribe")
 ASR_API_TIMEOUT_SECONDS = _float("ASR_API_TIMEOUT_SECONDS", 45.0)
 ASR_IDLE_UNLOAD_SECONDS = _float("ASR_IDLE_UNLOAD_SECONDS", 180.0)
@@ -399,6 +413,8 @@ ASR_MAX_SPEECH_SECONDS = _float("ASR_MAX_SPEECH_SECONDS", 30.0)
 ASR_LISTEN_TIMEOUT_SECONDS = _float("ASR_LISTEN_TIMEOUT_SECONDS", 15.0)
 ASR_PREROLL_MS = _int("ASR_PREROLL_MS", 500)
 ASR_ENERGY_END_RMS = _float("ASR_ENERGY_END_RMS", 0.008)
+# 能量端点回退（无 vad 梯级时）：语音起始阈值，需高于结束阈值形成迟滞
+ASR_ENERGY_START_RMS = _float("ASR_ENERGY_START_RMS", 0.02)
 ASR_ENERGY_END_MS = _int("ASR_ENERGY_END_MS", 450)
 # Recovery watchdog while a post-barge-in capture still lacks ownership from
 # its fresh Conversation VAD iterator.  This is not the user's speech limit;
@@ -413,6 +429,41 @@ ASR_SPECULATIVE_END_MS = _int("ASR_SPECULATIVE_END_MS", 160)
 # 端点确认且文本一致时放行 TTS，否则静默作废。
 # 仅对本地首句链路（hybrid/hybrid2/hybrid3）生效——远程单链有计费与幂等成本。
 ASR_SPECULATIVE_LLM_START = _bool("ASR_SPECULATIVE_LLM_START", True)
+
+# Global PixiJS render budget shared by the chat and wallpaper surfaces.
+GRAPHICS_PROFILES = frozenset({"standard", "power_saving", "custom"})
+GRAPHICS_PROFILE = _str("GRAPHICS_PROFILE", "standard").strip().lower()
+RENDER_MAX_FPS = _int("RENDER_MAX_FPS", 30)
+RENDER_MAX_RESOLUTION = _float("RENDER_MAX_RESOLUTION", 1.5)
+
+
+def _resolve_graphics_profile(
+    profile: str,
+    custom_max_fps: int,
+    custom_max_resolution: float,
+) -> tuple[int, float | None]:
+    if profile not in GRAPHICS_PROFILES:
+        raise ValueError(
+            "GRAPHICS_PROFILE must be one of "
+            + ", ".join(sorted(GRAPHICS_PROFILES))
+            + f"; observed {profile!r}"
+        )
+    if not 10 <= custom_max_fps <= 240:
+        raise ValueError("RENDER_MAX_FPS must be between 10 and 240")
+    if not 0.25 <= custom_max_resolution <= 4.0:
+        raise ValueError("RENDER_MAX_RESOLUTION must be between 0.25 and 4.0")
+    if profile == "standard":
+        return 60, None
+    if profile == "power_saving":
+        return 30, 1.5
+    return custom_max_fps, custom_max_resolution
+
+
+RENDER_EFFECTIVE_MAX_FPS, RENDER_EFFECTIVE_MAX_RESOLUTION = _resolve_graphics_profile(
+    GRAPHICS_PROFILE,
+    RENDER_MAX_FPS,
+    RENDER_MAX_RESOLUTION,
+)
 
 # Wallpaper diagnostics. keyboard_sfx.gate is a high-frequency client-side
 # gate snapshot; keep it out of WARNING unless explicitly diagnosing SFX.
@@ -495,6 +546,33 @@ PROVIDER_RUN_EVENT_CAP = _int("PROVIDER_RUN_EVENT_CAP", 500)
 PROVIDER_WORK_HEARTBEAT_S = _int("PROVIDER_WORK_HEARTBEAT_S", 45)
 PROVIDER_WORK_QUIET_NOTICE_S = _int("PROVIDER_WORK_QUIET_NOTICE_S", 90)
 PROVIDER_WORK_QUIET_REPEAT_S = _int("PROVIDER_WORK_QUIET_REPEAT_S", 300)
+# Whole-instance routing selector. Keep both routing strategies and share their
+# execution/presentation facilities; false selects the original Chat authority
+# at restart. The JSON is a Host-authored ProviderRequirements contract, not a
+# capability inference.
+COOPERATIVE_CHAT_ENABLED = _bool("COOPERATIVE_CHAT_ENABLED", True)
+# Professional cooperative routing is the default. False selects basic cooperative
+# routing; the whole-instance selector above restores original Chat at restart.
+# A failed professional decision never falls back to a different route.
+COOPERATIVE_WORK_PLANNER_ENABLED = _bool("COOPERATIVE_WORK_PLANNER_ENABLED", True)
+# Optional model on the existing LLM backend; empty inherits the role model.
+COOPERATIVE_WORK_PLANNER_MODEL = _str("COOPERATIVE_WORK_PLANNER_MODEL", "").strip()
+COOPERATIVE_CHAT_PROVIDER = _str("COOPERATIVE_CHAT_PROVIDER", "codex").strip().lower()
+COOPERATIVE_CHAT_REQUIREMENTS_JSON = _str(
+    "COOPERATIVE_CHAT_REQUIREMENTS_JSON",
+    '{"task_kind":"general","workspace_access":"write",'
+    '"workspace_ownership":"caller","ownership":"managed","resume":"attach"}',
+)
+COOPERATIVE_CHAT_ADDITIONAL_REQUIREMENTS_JSON = _str(
+    "COOPERATIVE_CHAT_ADDITIONAL_REQUIREMENTS_JSON", "{}",
+)
+COOPERATIVE_CHAT_QUERY_TIMEOUT_S = _float("COOPERATIVE_CHAT_QUERY_TIMEOUT_S", 45.0)
+COOPERATIVE_CHAT_QUERY_MAX_TOKENS = _int("COOPERATIVE_CHAT_QUERY_MAX_TOKENS", 900)
+COOPERATIVE_CHAT_PERMISSION_POLICY = _str(
+    "COOPERATIVE_CHAT_PERMISSION_POLICY", "ask",
+).strip().lower()
+if COOPERATIVE_CHAT_PERMISSION_POLICY not in {"deny", "ask"}:
+    raise ValueError("COOPERATIVE_CHAT_PERMISSION_POLICY supports deny or ask")
 # Host-owned Project trust roots. Project/Scratch/focus routing and Host diff
 # inspection read only this setting; retired Provider settings cannot widen it.
 WORK_PROJECT_ALLOWLIST = _str("WORK_PROJECT_ALLOWLIST", "")
@@ -679,6 +757,12 @@ COMPOUND_CONTROL_SHADOW_ENABLED = _bool(
     "COMPOUND_CONTROL_SHADOW_ENABLED", False
 )
 
+# Observe how the existing Work/AUIP/Browser witnesses converge for one origin
+# turn.  This adds no planner call and owns no dispatch: it records immutable
+# provenance plus a read-only ShadowTurnDecision so cardinality and cross-axis
+# relations can be replayed before any production authority migration.
+TURN_DECISION_SHADOW_ENABLED = _bool("TURN_DECISION_SHADOW_ENABLED", True)
+
 # AUIP action existence has a source-local decision axis because an AppSession
 # is neither Provider Work nor a Project/WorkItem.  When enabled, the role
 # prompt no longer carries a duplicate AUIP tag contract: the role speaks
@@ -689,6 +773,9 @@ COMPOUND_CONTROL_SHADOW_ENABLED = _bool(
 # authority; setting the flag false restores the legacy inline-role proposal
 # for bounded rollback.
 AUIP_CONTROL_DECISION_ENABLED = _bool("AUIP_CONTROL_DECISION_ENABLED", True)
+
+# Generation preference; never restyles existing artifacts or overrides user design.
+AUIP_ARTIFACT_STYLE_ENABLED = _bool("AUIP_ARTIFACT_STYLE_ENABLED", True)
 
 # Resolve the entity of an already-proposed Project focus against complete
 # host catalogs.  Genuine ambiguity becomes a one-shot Slice selection before

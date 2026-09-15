@@ -4,8 +4,8 @@ Status: **pre-release inventory — no known unresolved provenance component is
 selected as a release blocker under the stated immediate-upstream policy**.
 
 Amadeus first-party code, documentation, modifications, and recorded original
-brand assets are published under the PolyForm Noncommercial License 1.0.0.
-That source-available license does not replace or narrow third-party rights.
+brand assets are open-source under the GNU Affero General Public License v3.0
+(AGPL-3.0). That license does not replace or narrow third-party rights.
 Publishing components in the same repository does not change their existing
 MIT, Apache-2.0, GPL, CC0, or proprietary terms.
 
@@ -15,6 +15,16 @@ into the Amadeus repository. The machine-readable authority is
 the cu124 dependency audit and future SBOM rather than duplicated here.
 
 ## Verified for the stated disposition
+
+### aec-audio-processing (Linux source build)
+
+- Baseline: official PyPI `aec-audio-processing` 1.0.1 sdist.
+- Local change: one Meson argument forces bundled Abseil for this build.
+- Provenance and removal: `vendor/aec-audio-processing.PROVENANCE.md`.
+- Complete bundled license/attribution texts are preserved in the source tree
+  and in `vendor/aec-audio-processing/src/files/THIRD_PARTY_NOTICES.txt`, which
+  is included by the existing wheel package-data rule.
+- Disposition: included; Windows/macOS retain the PyPI source selection.
 
 ### GPT-SoVITS upstream license
 
@@ -123,7 +133,7 @@ AGPL-3.0-licensed Hugging Face Space
 `Naozumi0512/Bert-VITS2-Cantonese-Yue`, not merely a file that mentions it.
 The full upstream license is retained in
 `LICENSES/Bert-VITS2-Cantonese-Yue-AGPL-3.0.txt`; the implementation is
-excluded from the intended PolyForm public source archive. The private
+excluded from the intended Amadeus public source archive. The private
 checkout is unchanged.
 
 ### GPT-SoVITS caches, custom Japanese dictionary, and UVR5 utility

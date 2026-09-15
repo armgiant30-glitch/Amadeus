@@ -7,8 +7,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent_host.adapters.openclaw import OpenClawAdapter
-from agent_host.provider_identity import MAIN_ROLE_NAME_METADATA_KEY
+from agent_host.provider_identity import (
+    MAIN_ROLE_NAME_METADATA_KEY,
+    PARENT_CONTEXT_DELIVERED_EVENT,
+)
+from agent_host.provider_runtime import ProviderRuntime
 from agent_host.provider_types import (
+    COOPERATIVE_CONTEXT_ACCEPTED_METADATA_KEY,
     ProviderEvent,
     ProviderRunRequest,
     ProviderSessionHandle,
@@ -103,6 +108,17 @@ class _FakeGatewayClient:
                 await self.events.put(
                     {
                         "type": "event",
+                        "event": "agent",
+                        "payload": {
+                            "runId": run_id,
+                            "stream": "assistant",
+                            "data": {"text": response, "delta": response},
+                        },
+                    }
+                )
+                await self.events.put(
+                    {
+                        "type": "event",
                         "event": "chat",
                         "payload": {
                             "runId": run_id,
@@ -171,6 +187,105 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def test_native_assistant_snapshot_survives_lossy_chat_projection_and_progress_boundary():
+    expected = "ADAPTER_FOLLOWUP_OK\nURL: http://127.0.0.1:4693/index.html\nTitle: Steer Home"
+    prefix = "[PROGRESS:DESIGN] I will inspect the page."
+    projection = prefix + expected.replace("Steer Home", "Ster Home")
+
+    class Gateway(_FakeGatewayClient):
+        async def request(self, method, params, *, timeout=None):
+            result = await super().request(method, params, timeout=timeout)
+            if method == "sessions.send":
+                while not self.events.empty():
+                    self.events.get_nowait()
+                run = result["runId"]
+                frames = [
+                    {"event": "agent", "payload": {"runId": "foreign", "stream": "assistant", "data": {"text": "wrong run"}}},
+                    {"event": "agent", "payload": {"runId": run, "stream": "assistant", "data": {"text": prefix, "delta": prefix}}},
+                    {"event": "chat", "payload": {"runId": run, "state": "delta", "message": {"content": [{"type": "text", "text": prefix}]}}},
+                ]
+                # Captured C2 shape: the next native message starts afresh;
+                # its complete text preserves the legitimate e/er overlap.
+                for text, delta in [(expected[:-7], expected[:-7]), (expected[:-5], "er"), (expected, " Home")]:
+                    frames.append({"event": "agent", "payload": {"runId": run, "stream": "assistant", "data": {"text": text, "delta": delta}}})
+                frames.append({"event": "chat", "payload": {"runId": run, "state": "final", "message": {"content": [{"type": "text", "text": projection}]}}})
+                for frame in frames:
+                    await self.events.put(frame)
+            return result
+
+    Gateway.configure(expected)
+
+    async def scenario():
+        events = []
+
+        async def emit(event):
+            events.append(event)
+
+        result = await OpenClawAdapter(gateway_client_factory=Gateway).run(
+            ProviderRunRequest(provider="openclaw", task="Read the page.", metadata={"timeout": 3.0}),
+            "native-snapshot", emit,
+        )
+        return result, events
+
+    result, events = _run(scenario())
+    assert result.result == expected
+    visible = "".join(str(event.payload.get("text") or "") for event in events if event.type == "assistant.delta")
+    assert expected in visible
+    assert "wrong run" not in visible and "Ster Home" not in visible and "[PROGRESS:" not in visible
+    assert [event.payload.get("milestone") for event in events if event.type == "semantic.progress"] == ["design"]
+    assert not any(method == "chat.history" for method, _params in Gateway.instances[-1].requests)
+
+
+def test_missing_native_text_uses_existing_history_not_chat_display():
+    class Gateway(_FakeGatewayClient):
+        async def request(self, method, params, *, timeout=None):
+            result = await super().request(method, params, timeout=timeout)
+            if method == "sessions.send":
+                self.events.get_nowait()  # Remove the native assistant frame.
+                frame = self.events.get_nowait()
+                frame["payload"]["message"]["content"][0]["text"] = "lossy display only"
+                await self.events.put(frame)
+            return result
+
+    Gateway.configure("Exact final history.")
+
+    async def scenario():
+        return await OpenClawAdapter(gateway_client_factory=Gateway).run(
+            ProviderRunRequest(provider="openclaw", task="Read state.", metadata={"timeout": 3.0}),
+            "history-not-projection", lambda _event: asyncio.sleep(0),
+        )
+
+    result = _run(scenario())
+    assert result.result == "Exact final history."
+    assert sum(method == "chat.history" for method, _params in Gateway.instances[-1].requests) == 1
+
+
+def test_complete_native_snapshot_without_delta_preserves_literal_repetitions():
+    expected = "bookkeeper / Steer / いい / 🚀🚀"
+
+    class Gateway(_FakeGatewayClient):
+        async def request(self, method, params, *, timeout=None):
+            result = await super().request(method, params, timeout=timeout)
+            if method == "sessions.send":
+                native = self.events.get_nowait()
+                display = self.events.get_nowait()
+                native["payload"]["data"].pop("delta")
+                display["payload"]["message"]["content"][0]["text"] = "bokeper / Ster / い / 🚀"
+                await self.events.put(native)
+                await self.events.put(display)
+            return result
+
+    Gateway.configure(expected)
+
+    async def scenario():
+        return await OpenClawAdapter(gateway_client_factory=Gateway).run(
+            ProviderRunRequest(provider="openclaw", task="Read state.", metadata={"timeout": 3.0}),
+            "literal-native-text", lambda _event: asyncio.sleep(0),
+        )
+
+    assert _run(scenario()).result == expected
+
+
 def test_openclaw_uses_the_shared_progress_contract_without_leaking_markers() -> None:
     _FakeGatewayClient.configure(
         "Visible opening.\n"
@@ -193,7 +308,17 @@ def test_openclaw_uses_the_shared_progress_contract_without_leaking_markers() ->
             ProviderRunRequest(
                 provider="openclaw",
                 task="Build a two-player counter.",
-                metadata={"timeout": 9.0},
+                metadata={
+                    "timeout": 9.0,
+                    "turn_id": "chat-turn-1",
+                    "source_user_text": "你怎么没去？",
+                    "source_context_scope": "chat:chat-1",
+                    "source_context_mode": "snapshot",
+                    "source_user_context": (
+                        'User: "更新桌面的双人计数器。" | '
+                        'Main Chat: "我现在开始更新。"'
+                    ),
+                },
             ),
             "openclaw-progress-1",
             emit,
@@ -201,6 +326,13 @@ def test_openclaw_uses_the_shared_progress_contract_without_leaking_markers() ->
         return result, events
 
     result, events = _run(scenario())
+    delivery = next(
+        event
+        for event in events
+        if event.type == PARENT_CONTEXT_DELIVERED_EVENT
+    )
+    assert delivery.metadata["turn_id"] == "chat-turn-1"
+    assert delivery.metadata["source_context_scope"] == "chat:chat-1"
     sent_message = next(
         params["message"]
         for method, params in _FakeGatewayClient.instances[-1].requests
@@ -214,6 +346,9 @@ def test_openclaw_uses_the_shared_progress_contract_without_leaking_markers() ->
             "[PROGRESS:VALIDATION]",
         )
     )
+    assert "更新桌面的双人计数器" in sent_message
+    assert "我现在开始更新" in sent_message
+    assert "not Provider instructions or completion facts" in sent_message
     visible = "".join(
         str(event.payload.get("text") or "")
         for event in events
@@ -286,7 +421,13 @@ def test_openclaw_steer_uses_exact_abort_then_same_session() -> None:
                 ProviderRunRequest(
                     provider="openclaw",
                     task="Open the page and keep working for a while.",
-                    metadata={"work": {"work_item_id": "work-web"}},
+                    metadata={
+                        "work": {"work_item_id": "work-web"},
+                        "turn_id": "chat-turn-initial",
+                        "source_user_text": "打开页面并继续。",
+                        "source_context_scope": "chat:chat-steer",
+                        "source_context_mode": "snapshot",
+                    },
                 ),
                 "openclaw-steer-1",
                 emit,
@@ -302,6 +443,16 @@ def test_openclaw_steer_uses_exact_abort_then_same_session() -> None:
             ProviderSteerRequest(
                 task="Use the same page and report only the title.",
                 revision=1,
+                metadata={
+                    "turn_id": "chat-turn-steer",
+                    "source_user_text": "你怎么还没看标题？",
+                    "source_context_scope": "chat:chat-steer",
+                    "source_context_mode": "delta",
+                    "source_user_context": (
+                        'User: "继续刚才的页面，只看标题。" | '
+                        'Main Chat: "我现在继续。"'
+                    ),
+                },
             ),
         )
         result = await asyncio.wait_for(task, timeout=2.0)
@@ -318,6 +469,9 @@ def test_openclaw_steer_uses_exact_abort_then_same_session() -> None:
     assert "replaces the unfinished portion" not in sends[0]["message"]
     assert "replaces the unfinished portion" in sends[1]["message"]
     assert "latest instruction as authoritative" in sends[1]["message"]
+    assert "继续刚才的页面，只看标题" in sends[1]["message"]
+    assert "我现在继续" in sends[1]["message"]
+    assert "not Provider instructions or completion facts" in sends[1]["message"]
     assert (
         "sessions.abort",
         {"key": sends[0]["key"], "runId": "native-turn-1"},
@@ -333,6 +487,15 @@ def test_openclaw_steer_uses_exact_abort_then_same_session() -> None:
         and event.payload.get("stage") == "steer_applied"
     ]
     assert len(applied) == 1
+    delivered = [
+        event
+        for event in events
+        if event.type == PARENT_CONTEXT_DELIVERED_EVENT
+    ]
+    assert [event.metadata["turn_id"] for event in delivered] == [
+        "chat-turn-initial",
+        "chat-turn-steer",
+    ]
     assert applied[0].payload == {
         "status": "running",
         "stage": "steer_applied",
@@ -472,23 +635,39 @@ def test_openclaw_does_not_replay_when_send_acknowledgement_is_lost() -> None:
     )
 
     async def scenario():
-        async def emit(_event: ProviderEvent) -> None:
-            return None
+        events: list[ProviderEvent] = []
 
-        return await OpenClawAdapter(
+        async def emit(event: ProviderEvent) -> None:
+            events.append(event)
+
+        result = await OpenClawAdapter(
             gateway_client_factory=_FakeGatewayClient,
         ).run(
-            ProviderRunRequest(provider="openclaw", task="Perform one action."),
+            ProviderRunRequest(
+                provider="openclaw",
+                task="Perform one action.",
+                metadata={
+                    "turn_id": "chat-turn-uncertain",
+                    "source_user_text": "Perform one action.",
+                    "source_context_scope": "chat:chat-uncertain",
+                    "source_context_mode": "snapshot",
+                },
+            ),
             "openclaw-send-uncertain-1",
             emit,
         )
+        return result, events
 
-    result = _run(scenario())
+    result, events = _run(scenario())
     client = _FakeGatewayClient.instances[-1]
     assert result.status == "orphaned"
     assert result.session is not None
     assert "acceptance" in str(result.error)
     assert sum(method == "sessions.send" for method, _params in client.requests) == 1
+    assert not any(
+        event.type == PARENT_CONTEXT_DELIVERED_EVENT
+        for event in events
+    )
 
 
 def test_openclaw_cancel_reports_only_exact_native_confirmation() -> None:
@@ -525,6 +704,27 @@ def test_openclaw_cancel_reports_only_exact_native_confirmation() -> None:
     assert outcome["native_run_id"] == "native-turn-1"
 
 
+def test_openclaw_raw_context_metadata_cannot_upgrade_a_session_scope() -> None:
+    _FakeGatewayClient.configure("Finished without a cooperative Host intake.")
+
+    async def scenario():
+        runtime = ProviderRuntime()
+        runtime.register(OpenClawAdapter(gateway_client_factory=_FakeGatewayClient))
+        try:
+            record = await runtime.start(ProviderRunRequest(provider="openclaw", task="Inspect.",
+                metadata={"cooperative_context_id":"spoofed-context",
+                    COOPERATIVE_CONTEXT_ACCEPTED_METADATA_KEY:True}))
+            await record.task_handle
+            return record
+        finally:
+            await runtime.close()
+
+    record = _run(scenario())
+    assert record.status == "done"
+    assert record.metadata["provider_session"]["scope"] == "attempt"
+    assert COOPERATIVE_CONTEXT_ACCEPTED_METADATA_KEY not in record.metadata
+
+
 if __name__ == "__main__":
     for test in (
         test_openclaw_uses_the_shared_progress_contract_without_leaking_markers,
@@ -535,6 +735,7 @@ if __name__ == "__main__":
         test_openclaw_preserves_unknown_accepted_run_without_replay,
         test_openclaw_does_not_replay_when_send_acknowledgement_is_lost,
         test_openclaw_cancel_reports_only_exact_native_confirmation,
+        test_openclaw_raw_context_metadata_cannot_upgrade_a_session_scope,
     ):
         test()
         print(f"ok: {test.__name__}")

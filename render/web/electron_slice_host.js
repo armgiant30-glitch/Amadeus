@@ -3,7 +3,14 @@
 
   const params = new URLSearchParams(window.location.search || "");
   const surface = window.createCrtCanvasSurface();
+  const keyboardComposer = window.createWallpaperKeyboardComposer
+    ? window.createWallpaperKeyboardComposer()
+    : null;
   let bridgePort = normalizePort(params.get("bridgePort"));
+  let sliceBounds = null;
+  let canvasBounds = null;
+  let keyboardInputToggleBounds = null;
+  let keyboardComposerBounds = null;
   let eventSource = null;
   let shapeFrame = 0;
   let shapeFlushTimer = 0;
@@ -18,8 +25,35 @@
     return "http://127.0.0.1:" + bridgePort + "/wallpaper/" + path;
   }
 
+  function normalizeBounds(value) {
+    if (!value || typeof value !== "object") return null;
+    const bounds = {
+      x: Number(value.x),
+      y: Number(value.y),
+      width: Number(value.width),
+      height: Number(value.height),
+    };
+    return Object.values(bounds).every(Number.isFinite) && bounds.width > 0 && bounds.height > 0
+      ? bounds
+      : null;
+  }
+
+  function projectToSlice(bounds) {
+    if (!bounds || !sliceBounds || !sliceBounds.width || !sliceBounds.height) return null;
+    return {
+      x: (bounds.x - sliceBounds.x) / sliceBounds.width * window.innerWidth,
+      y: (bounds.y - sliceBounds.y) / sliceBounds.height * window.innerHeight,
+      width: bounds.width / sliceBounds.width * window.innerWidth,
+      height: bounds.height / sliceBounds.height * window.innerHeight,
+    };
+  }
+
   function layoutSurface() {
-    surface.layout({ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight });
+    const canvas = projectToSlice(canvasBounds);
+    if (canvas) surface.layout(canvas);
+    const toggle = projectToSlice(keyboardInputToggleBounds);
+    const composer = projectToSlice(keyboardComposerBounds);
+    if (keyboardComposer && toggle && composer) keyboardComposer.layout(toggle, composer);
     scheduleShapeUpdate();
   }
 
@@ -45,6 +79,8 @@
       { selector: ".crt-canvas-surface-dot", padding: 10 },
       { selector: ".crt-canvas-surface-status", padding: 10 },
       { selector: ".crt-canvas-surface-card", padding: 52 },
+      { selector: "#wallpaper-keyboard-toggle:not([hidden])", padding: 4 },
+      { selector: "#wallpaper-keyboard-composer:not([hidden])", padding: 4 },
     ];
     return targets.flatMap(({ selector, padding }) => (
       Array.from(document.querySelectorAll(selector)).map((element) => ({ element, padding }))
@@ -102,20 +138,27 @@
     const info = await response.json();
     bridgePort = normalizePort(info.bridgePort) || bridgePort;
     if (!bridgePort) throw new Error("wallpaper bridge is unavailable");
+    sliceBounds = normalizeBounds(info.sliceBounds);
+    canvasBounds = normalizeBounds(info.canvasBounds);
+    keyboardInputToggleBounds = normalizeBounds(info.keyboardInputToggleBounds);
+    keyboardComposerBounds = normalizeBounds(info.keyboardComposerBounds);
     window.__amadeusBridgePort = bridgePort;
     window.__amadeusBridgeToken = String(info.bridgeToken || "");
-  }
-
-  async function loadCanvasState() {
-    const response = await fetch(bridgeEndpoint("canvas-state"), { cache: "no-store" });
-    if (!response.ok) throw new Error("canvas state failed: HTTP " + response.status);
-    const state = await response.json();
-    (Array.isArray(state.calls) ? state.calls : []).forEach(applyCall);
+    if (keyboardComposer) keyboardComposer.configure(bridgePort, window.__amadeusBridgeToken);
+    layoutSurface();
   }
 
   function connectCanvasEvents() {
     if (eventSource) eventSource.close();
     eventSource = new EventSource(bridgeEndpoint("canvas-events"));
+    eventSource.onerror = () => { window.__amadeusBridgeToken = ""; };
+    eventSource.onopen = async () => {
+      // A reopened backend may have a new action credential at the same port.
+      if (!window.__amadeusBridgeToken) {
+        try { await resolveBridge(); }
+        catch (error) { console.warn("[ElectronSlice] bridge rediscovery failed", error); }
+      }
+    };
     eventSource.onmessage = (event) => {
       try {
         applyCall(JSON.parse(event.data));
@@ -127,7 +170,7 @@
 
   async function start() {
     layoutSurface();
-    const root = document.querySelector(".crt-canvas-surface");
+    const root = document.body;
     if (root) {
       new MutationObserver(scheduleShapeUpdate).observe(root, {
         attributes: true,
@@ -140,7 +183,7 @@
     }
     window.addEventListener("resize", layoutSurface, { passive: true });
     await resolveBridge();
-    await loadCanvasState();
+    // The subscription starts with current Canvas state, including reconnects.
     connectCanvasEvents();
     scheduleShapeUpdate();
   }

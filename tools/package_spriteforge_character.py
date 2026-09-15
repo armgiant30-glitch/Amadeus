@@ -301,6 +301,9 @@ def _mouth_runtime_config(
             raw_anchor = anchors[closed_index] if 0 <= closed_index < len(anchors) else {}
             anchor = dict(raw_anchor) if isinstance(raw_anchor, dict) else {}
         texture = _sidecar(source, suffix)
+        # An explicit source is a visually selected closed mouth. The loop's
+        # minimum openness score may still be an open mouth; it is not an
+        # equivalent fallback when that source has not been encoded.
         if not texture.is_file() or texture.stat().st_size <= 0:
             if use_closed_source:
                 # An explicit closed-mouth source was selected. Falling back to the

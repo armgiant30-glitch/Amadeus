@@ -1,4 +1,4 @@
-﻿"""Adapter for system config, status, and lifecycle."""
+"""Adapter for system config, status, and lifecycle."""
 
 from __future__ import annotations
 
@@ -384,6 +384,22 @@ def _voice_configuration(settings: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _artifact_configuration(settings: Any) -> list[dict[str, Any]]:
+    return [{
+        "id": "auip_artifact_style",
+        "label": "Artifact appearance",
+        "configured": True,
+        "status_ok": True,
+        "status": "enabled" if settings.AUIP_ARTIFACT_STYLE_ENABLED else "disabled",
+        "description": "A shared visual language for newly authored AUIP apps; each app keeps its own content and layout.",
+        "fields": [_startup_field(
+            "AUIP_ARTIFACT_STYLE_ENABLED", "Use Amadeus style",
+            settings.AUIP_ARTIFACT_STYLE_ENABLED, field_type="boolean",
+            description="After a backend restart, provide the style guide and CSS for future AUIP creation. Existing apps keep their design; explicit user design requests take priority.",
+        )],
+    }]
+
+
 def _avatar_configuration(settings: Any) -> list[dict[str, Any]]:
     enabled = bool(settings.VTS_ENABLED)
     return [
@@ -420,8 +436,25 @@ def _model_connections(
     *,
     local_status: dict[str, Any] | None = None,
     hybrid_status: dict[str, Any] | None = None,
+    rag_status: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     active = str(active_provider or "deepseek").strip().lower()
+    from core.character_rag import CharacterRAG
+
+    rag_status = rag_status if rag_status is not None else CharacterRAG().status()
+    rag_detail = (
+        f"{rag_status['detail']} Directory: {rag_status['index_dir']}. "
+        f"Applied threshold: {rag_status['max_distance']}; top-k: {rag_status['top_k']}."
+    )
+    if rag_status.get("model"):
+        rag_detail += f" Model: {rag_status['model']}; entries: {rag_status['entries']}."
+    last_retrieval = rag_status.get("last_retrieval")
+    if last_retrieval:
+        rag_detail += (
+            f" Last retrieval: {last_retrieval['matched_count']} matches; "
+            f"nearest distance: {last_retrieval['nearest_distance']}; "
+            f"reference selected: {last_retrieval['reference_selected']}."
+        )
     active_connections = {
         "hybrid": {"hybrid_local", "bedrock"},
         "hybrid2": {"hybrid_local", "deepseek"},
@@ -434,19 +467,6 @@ def _model_connections(
             field_type="select", options=("llama_server", "lmstudio", "ollama", "cli"),
         ),
         _startup_field("LOCAL_LLM_MODEL", "Model", settings.LOCAL_LLM_MODEL),
-        _startup_field(
-            "RAG_ENABLED_FOR_LOCAL", "Local knowledge retrieval",
-            bool(settings.RAG_ENABLED_FOR_LOCAL), field_type="boolean",
-        ),
-        _startup_field(
-            "RAG_TOP_K", "Knowledge results", settings.RAG_TOP_K,
-            field_type="number", minimum=1, maximum=20, step=1,
-        ),
-        _startup_field(
-            "RAG_MAX_DISTANCE", "Knowledge distance threshold",
-            settings.RAG_MAX_DISTANCE, field_type="number",
-            minimum=0, maximum=2, step=0.01,
-        ),
     ]
     if local_type == "llama_server":
         local_fields.extend(
@@ -540,6 +560,22 @@ def _model_connections(
                     field_type="select",
                     options=("deepseek", "openai", "gemini", "bedrock", "local", "hybrid", "hybrid2", "hybrid3"),
                 ),
+            ],
+        },
+        {
+            "id": "character_rag",
+            "label": "Character knowledge (optional RAG)",
+            "description": "Local retrieval for all chat models. Build an index first; retrieved excerpts are sent to the selected model, including remote APIs. Restart after changes.",
+            "active": bool(settings.RAG_ENABLED),
+            "configured": bool(rag_status["index_present"]),
+            "status": rag_status["state"],
+            "status_ok": rag_status["state"] in {"ready", "disabled"},
+            "status_detail": rag_detail,
+            "fields": [
+                _startup_field("RAG_ENABLED", "Enable character knowledge", bool(settings.RAG_ENABLED), field_type="boolean"),
+                _startup_field("RAG_INDEX_DIR", "Built index directory", settings.RAG_INDEX_DIR, field_type="path"),
+                _startup_field("RAG_TOP_K", "Maximum results", settings.RAG_TOP_K, field_type="number", minimum=1, maximum=20, step=1),
+                _startup_field("RAG_MAX_DISTANCE", "Maximum squared L2 distance", settings.RAG_MAX_DISTANCE, field_type="number", minimum=0, maximum=4, step=0.01),
             ],
         },
         {
@@ -656,6 +692,34 @@ def _model_connections(
 
 
 def _model_role_configuration(settings: Any) -> list[dict[str, Any]]:
+    from server.auip_b2 import b2_runtime_unavailable_reason
+    from server.auip_b2_role_llm import has_b2_role_model_config
+
+    b2_unavailable = b2_runtime_unavailable_reason(
+        role_branch_mode=getattr(settings, "AUIP_APPSESSION_ROLE_BRANCH_MODE", "b2"),
+        control_decision_available=bool(
+            getattr(settings, "AUIP_CONTROL_DECISION_ENABLED", False)
+        ),
+        role_model_available=has_b2_role_model_config(),
+    )
+    b2_active = str(
+        getattr(settings, "AUIP_APPSESSION_ROLE_BRANCH_MODE", "b2") or ""
+    ).strip().lower() == "b2"
+    if b2_unavailable == "b2_control_decision_unavailable":
+        b2_status_detail = (
+            "B2 is selected, but its source-local AUIP decision lane is disabled. "
+            "Application actions remain blocked; Chat and Settings stay available."
+        )
+    elif b2_unavailable == "b2_role_model_unavailable":
+        b2_status_detail = (
+            "B2 is selected, but no supported OpenAI or DeepSeek action model credential "
+            "is configured. Application actions remain blocked until setup and restart."
+        )
+    elif b2_active:
+        b2_status_detail = "B2 application action decisions are available."
+    else:
+        b2_status_detail = "B2 is not selected; this action role is optional."
+
     return [
         {
             "id": "work_observer",
@@ -680,8 +744,12 @@ def _model_role_configuration(settings: Any) -> list[dict[str, Any]]:
         {
             "id": "auip_action",
             "label": "AUIP action decision",
-            "description": "Optional decision-quality override for AUIP participation.",
-            "configured": True,
+            "description": "Decision-quality model used by the default B2 AppSession action path.",
+            "active": b2_active,
+            "configured": not bool(b2_unavailable),
+            "status": "needs_setup" if b2_unavailable else "available" if b2_active else "optional",
+            "status_ok": not bool(b2_unavailable),
+            "status_detail": b2_status_detail,
             "fields": [
                 _startup_field("AUIP_ACTION_PROVIDER", "Provider override", settings.AUIP_ACTION_PROVIDER),
                 _startup_field("AUIP_ACTION_MODEL", "Model override", settings.AUIP_ACTION_MODEL),
@@ -697,6 +765,17 @@ def _model_role_configuration(settings: Any) -> list[dict[str, Any]]:
                 ),
             ],
         },
+    ]
+
+
+def _acp_credentials() -> list[dict[str, Any]]:
+    import os
+
+    return [
+        _startup_field("ANTHROPIC_API_KEY", "Anthropic API key", field_type="secret",
+                       secret_configured=bool(os.environ.get("ANTHROPIC_API_KEY"))),
+        _startup_field("DEEPSEEK_API_KEY", "DeepSeek API key", field_type="secret",
+                       secret_configured=bool(os.environ.get("DEEPSEEK_API_KEY"))),
     ]
 
 
@@ -833,6 +912,7 @@ class SystemHandler(RequestHandler):
         import llm.client as llm_client
         from server import visual_runtime
         from server import presentation_runtime
+        from server import chat_translation_runtime
         from render.character_pack import character_pack_status
         from config.asset_packages import external_asset_pack_status
         import tts.pipeline as tts_pipeline
@@ -878,9 +958,12 @@ class SystemHandler(RequestHandler):
                 active_provider,
                 local_status=local_status,
                 hybrid_status=hybrid_status,
+                rag_status=chat_runtime.character_rag.status(),
             ),
             "model_roles": _model_role_configuration(settings),
             "work_provider_configuration": _work_provider_configuration(settings),
+            "acp_credentials": _acp_credentials(),
+            "artifact_configuration": _artifact_configuration(settings),
             "voice_configuration": voice_configuration,
             "avatar_configuration": _avatar_configuration(settings),
             "asr_backends": asr_backend_statuses(asr_backend),
@@ -896,11 +979,37 @@ class SystemHandler(RequestHandler):
             "vision_region": vision.get("region", ""),
             "vision_window_handle": vision.get("window_handle", ""),
             **presentation_runtime.get_config(),
+            **chat_translation_runtime.get_config(),
             "control_decision_mode": (
                 "authority"
                 if bool(getattr(chat_runtime, "_control_proposal_authority", False))
                 else "shadow"
                 if getattr(chat_runtime, "_control_proposal_observer", None) is not None
+                else "disabled"
+            ),
+            "cooperative_chat_enabled": bool(
+                getattr(settings, "COOPERATIVE_CHAT_ENABLED", False)
+            ),
+            "cooperative_work_planner_enabled": bool(
+                getattr(settings, "COOPERATIVE_CHAT_ENABLED", False)
+                and getattr(settings, "COOPERATIVE_WORK_PLANNER_ENABLED", False)
+            ),
+            "cooperative_work_planner_model": str(
+                getattr(settings, "COOPERATIVE_WORK_PLANNER_MODEL", "") or ""
+            ),
+            "cooperative_chat_input_capabilities": {
+                "typed_text": True,
+                "confirmed_transcript_text": True,
+                "visual_attachment": True,
+                "speculative_voice": False,
+                "physical_voice_validated": False,
+            },
+            "cooperative_chat_provider": str(
+                getattr(settings, "COOPERATIVE_CHAT_PROVIDER", "") or ""
+            ),
+            "cooperative_permission_policy": (
+                str(getattr(settings, "COOPERATIVE_CHAT_PERMISSION_POLICY", "") or "")
+                if bool(getattr(settings, "COOPERATIVE_CHAT_ENABLED", False))
                 else "disabled"
             ),
         }
@@ -910,7 +1019,9 @@ class SystemHandler(RequestHandler):
         if not isinstance(values, dict) or not values:
             raise ValueError("system.set_config requires a non-empty values object")
 
+        from config import settings
         from server import presentation_runtime
+        from server import chat_translation_runtime
         from server import visual_runtime
         from server import wallpaper_subtitle_runtime
         import tts.pipeline as tts_pipeline
@@ -932,6 +1043,7 @@ class SystemHandler(RequestHandler):
             "presentation_locale",
             "wallpaper_caption_mode",
             "wallpaper_subtitle_language",
+            "chat_translation_subtitles_enabled",
         }
         unknown = sorted(str(key) for key in values if str(key) not in allowed)
         if unknown:
@@ -1003,6 +1115,11 @@ class SystemHandler(RequestHandler):
             if caption_mode not in presentation_runtime.VALID_CAPTION_MODES:
                 raise ValueError(f"unsupported wallpaper caption mode: {caption_mode!r}")
             values["wallpaper_caption_mode"] = caption_mode
+        if (
+            "chat_translation_subtitles_enabled" in values
+            and not isinstance(values["chat_translation_subtitles_enabled"], bool)
+        ):
+            raise ValueError("chat_translation_subtitles_enabled must be a boolean")
 
         if {"llm_provider", "local_llm_type"}.intersection(values):
             if self._is_chat_busy is not None and self._is_chat_busy():
@@ -1060,9 +1177,15 @@ class SystemHandler(RequestHandler):
 
         visual_updated = visual_runtime.set_config(values)
         presentation_updated = presentation_runtime.set_config(values)
+        chat_translation_updated = chat_translation_runtime.set_config(values)
         if presentation_updated:
             wallpaper_subtitle_runtime.refresh()
-        updated = list(dict.fromkeys([*updated, *visual_updated, *presentation_updated]))
+        updated = list(dict.fromkeys([
+            *updated,
+            *visual_updated,
+            *presentation_updated,
+            *chat_translation_updated,
+        ]))
         current = await self._get_config({})
         await bus.emit(Method.SYSTEM_CONFIG, {"values": current, "updated": updated})
         return {"updated": updated, "values": current}

@@ -24,13 +24,26 @@
   // ---------------------------------------------------------------------------
   // PixiJS Application
   // ---------------------------------------------------------------------------
+  const renderParams = new URLSearchParams(window.location.search || "");
+  const graphicsProfile = renderParams.get("graphicsProfile") || "standard";
+  const renderBudget = window.RenderBudget.resolveRenderBudget({
+    maxFps: renderParams.get("renderMaxFps"),
+    maxResolution: renderParams.get("renderMaxResolution"),
+    devicePixelRatio: window.devicePixelRatio,
+  });
   const app = new PIXI.Application({
     resizeTo: document.getElementById("canvas-container"),
     backgroundAlpha: 0,          // Transparent background
     autoDensity: true,
-    resolution: window.devicePixelRatio || 1,
+    resolution: renderBudget.resolution,
     antialias: true,
   });
+  const frameRateController = window.RenderBudget.createFrameRateController(
+    app.ticker,
+    renderBudget.maxFps,
+  );
+  frameRateController.apply();
+  window.RenderBudget.installWallpaperEngineListener(window, frameRateController);
   document.getElementById("canvas-container").appendChild(app.view);
 
   // ---------------------------------------------------------------------------
@@ -684,7 +697,8 @@
         const scale = Math.min(maxW / texture.width, maxH / texture.height);
         this.sprite.scale.set(scale);
         this.sprite.x = b.x + b.width * 0.52;
-        this.sprite.y = b.y + b.height * 0.96;
+        // Keep the lower artwork just inside the CRT viewport.
+        this.sprite.y = b.y + b.height - Math.max(3, b.height * 0.012);
         return;
       }
       const h = app.screen.height;
@@ -1531,6 +1545,7 @@
   // ---------------------------------------------------------------------------
   class RenderApp {
     constructor() {
+      this.graphicsProfile = graphicsProfile;
       this._sprite = new SpriteRenderer(app.stage);
       this._live2d = new Live2DRenderer(app.stage);
       this._subtitle = new SubtitleOverlay(app.stage);
