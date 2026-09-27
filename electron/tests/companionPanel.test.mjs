@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
 import { dockPanel, clampPanel } from '../src/main/companionPanelLayout.ts'
-import { readCompanionPortraits } from '../src/main/companionPortraits.ts'
+import { companionPortraitStatus, readCompanionPortraits } from '../src/main/companionPortraits.ts'
 
 const overlap = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
 test('docking reserves disjoint game/card space on wide, narrow and negative-origin monitors', () => {
@@ -39,6 +39,37 @@ test('optional VN cache reuses frames but cannot read outside its root', async (
     assert.equal(frames.normal.speaking.length, 1)
     assert.equal(Buffer.from(frames.normal.idle[0].split(',')[1], 'base64').toString(), 'portrait')
     assert.deepEqual(await readCompanionPortraits(path.join(root, 'missing')), {})
+    const status = await companionPortraitStatus(path.join(root, 'cache'))
+    assert.equal(status.state, 'incomplete')
+    assert.equal(status.emotionCount, 1)
+    assert.equal(status.frameCount, 1)
+    assert.equal((await companionPortraitStatus(path.join(root, 'missing'))).state, 'not_installed')
+    await fs.writeFile(path.join(root, 'cache', 'manifest.json'), JSON.stringify({ emotions: {
+      normal: { idle: ['face.png'], speaking: ['face.png'] },
+    } }))
+    assert.equal((await companionPortraitStatus(path.join(root, 'cache'))).state, 'ready')
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+test('default Companion Lite atlas reports installed WebP resources', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'companion-atlas-'))
+  try {
+    const clip = Buffer.from('webp-atlas')
+    await fs.mkdir(path.join(root, 'normal'))
+    await fs.writeFile(path.join(root, 'normal', 'idle.webp'), clip)
+    await fs.writeFile(path.join(root, 'manifest.json'), JSON.stringify({
+      format: 'amadeus.companion-atlas.v1',
+      emotions: {
+        normal: {
+          idle: { url: 'normal/idle.webp', sequence: [0, 1], fileBytes: clip.length },
+          speaking: { url: 'normal/idle.webp', sequence: [0, 1, 2], fileBytes: clip.length },
+        },
+      },
+    }))
+    const status = await companionPortraitStatus(root)
+    assert.equal(status.state, 'ready')
+    assert.equal(status.installed, true)
+    assert.equal(status.emotionCount, 1)
+    assert.equal(status.frameCount, 5)
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 test('companion projects the shared current display without acting on Work or AUIP events', async () => {

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amadeus"
-version = "0.15.0a0"
+version = "0.15.2a0"
 description = "Amadeus runtime: voice, chat runtime, provider host, and work ledger."
 requires-python = ">=3.12,<3.13"
 
@@ -35,6 +35,7 @@ dependencies = [
     "uvicorn==0.48.0",
     "websocket-client==1.9.0",
     "websockets==16.0",
+    "windows-capture==2.0.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ rag = [
 # L2 voice interaction layer: playback, capture, echo cancellation, remote
 # TTS/ASR. Torch-free on purpose: L2 stays a few hundred MB.
 voice = [
+    "msgpack>=1.2.1,<2",
     "PyAudio==0.2.14",
     "aec-audio-processing==1.0.1",
     "av==17.0.1",
@@ -225,6 +227,7 @@ packages = [
     "tools",
     "tts",
     "vn_player",
+    "vn_player.prompt_layers",
     "vts",
     "wallpaper",
 ]

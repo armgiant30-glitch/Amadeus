@@ -694,6 +694,16 @@ async def bootstrap(port: int = 17777) -> None:
         asyncio.create_task(_request_exit())
         return {"ok": True}
 
+    @app.post("/wallpaper/stop")
+    async def stop_wallpaper_host(request: Request):
+        if not _http_request_authenticated(request.headers, auth_policy):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _http_request_origin_allowed(request.headers, backend_port=port):
+            raise HTTPException(status_code=403, detail="Untrusted request origin")
+        # Electron owns the native host process. Its loss terminates the same
+        # backend lifecycle as a user disabling wallpaper, including wake/ASR.
+        return await wallpaper_h.handle(Method.WALLPAPER_STOP, {})
+
     @app.post("/vn/speak")
     async def vn_speak(payload: dict, request: Request):
         if not _http_request_authenticated(request.headers, auth_policy):
@@ -818,6 +828,14 @@ async def bootstrap(port: int = 17777) -> None:
         # between Japanese, Chinese, bilingual, or hidden captions.
         wallpaper_subtitle_runtime.update(japanese_text, chinese_text)
 
+    def _update_playback_subtitle(japanese_text: str, chinese_text: str = "") -> None:
+        from server.vn_tts_bridge import update_playback_subtitle
+
+        update_playback_subtitle(
+            playback_manager.current_playing_id, japanese_text, chinese_text,
+            update=_update_wallpaper_subtitle,
+        )
+
     wallpaper_subtitle_runtime.set_renderer(lambda text: wallpaper_h.set_subtitle(text))
     presentation_runtime.set_renderer(
         lambda profile: wallpaper_h.set_canvas_presentation(profile)
@@ -883,36 +901,14 @@ async def bootstrap(port: int = 17777) -> None:
     async def _server_check_and_display_pre_translation(sentence_id: str, japanese_text: str) -> None:
         try:
             try:
-                from server.vn_tts_bridge import get_vn_subtitle, is_vn_sentence
+                from server.vn_tts_bridge import display_vn_subtitle, is_vn_sentence
 
                 if is_vn_sentence(sentence_id):
-                    cached = await get_vn_subtitle(sentence_id, japanese_text)
-                    if cached and cached.get("status") == "completed" and cached.get("chinese"):
-                        await _server_display_chinese_subtitle_with_text(
-                            sentence_id,
-                            japanese_text,
-                            str(cached.get("chinese") or ""),
-                        )
-                        return
-                    await _server_display_chinese_subtitle_with_text(
-                        sentence_id,
-                        japanese_text,
-                        "",
-                    )
-
-                    async def _wait_for_vn_subtitle() -> None:
-                        for _ in range(120):
-                            await asyncio.sleep(0.1)
-                            data = await get_vn_subtitle(sentence_id, japanese_text)
-                            if data and data.get("status") == "completed" and data.get("chinese"):
-                                await _server_display_chinese_subtitle_with_text(
-                                    sentence_id,
-                                    japanese_text,
-                                    str(data.get("chinese") or ""),
-                                )
-                                return
-
-                    asyncio.create_task(_wait_for_vn_subtitle())
+                    asyncio.create_task(display_vn_subtitle(
+                        sentence_id, japanese_text,
+                        display=_server_display_chinese_subtitle_with_text,
+                        is_current=playback_manager.is_current_playback_sentence,
+                    ))
                     return
             except Exception:
                 logger.debug("vn subtitle probe failed", exc_info=True)
@@ -955,7 +951,7 @@ async def bootstrap(port: int = 17777) -> None:
             get_translation=None,
             cache_lock=None,
             cache_ref=None,
-            update_subtitle_display=_update_wallpaper_subtitle,
+            update_subtitle_display=_update_playback_subtitle,
             subtitle_available=True,
         ),
     )
@@ -1101,6 +1097,9 @@ async def bootstrap(port: int = 17777) -> None:
 
     def _on_sentence_start(sentence_id: str) -> None:
         _expr_ctrl.on_sentence_start(sentence_id)
+        from server.vn_tts_bridge import schedule_overlay_playback
+
+        schedule_overlay_playback(sentence_id, True, server_loop)
         try:
             from server.character_presentation import playback_bridge
             from server.vn_tts_bridge import get_vn_sentence_metadata
@@ -1116,6 +1115,9 @@ async def bootstrap(port: int = 17777) -> None:
     playback_manager.on_sentence_start = _on_sentence_start
 
     def _on_sentence_complete(sentence_id: str, _text: str) -> None:
+        from server.vn_tts_bridge import schedule_overlay_playback
+
+        schedule_overlay_playback(sentence_id, False, server_loop)
         try:
             from server.character_presentation import playback_bridge
 
@@ -1251,8 +1253,18 @@ async def bootstrap(port: int = 17777) -> None:
     mouth_signal_router.set_primary_sink(_render_signal_bridge.set_mouth_value)
 
     # thread pools & queues.
-    tts_max_workers = max(1, EXP_TTS_MAX_CONCURRENCY)
-    tts_executor = ThreadPoolExecutor(max_workers=tts_max_workers)
+    from tts.pipeline import MAX_SELECTABLE_TTS_CONCURRENCY, selectable_tts_concurrency
+
+    # The semaphore selects ×1/×2 and Settings switches it at runtime, so the
+    # worker pool must already fit the most parallel selectable mode.
+    tts_concurrency = selectable_tts_concurrency(EXP_TTS_MAX_CONCURRENCY)
+    if tts_concurrency != EXP_TTS_MAX_CONCURRENCY:
+        logger.warning(
+            "EXP_TTS_MAX_CONCURRENCY=%s is outside the selectable TTS modes; using %s",
+            EXP_TTS_MAX_CONCURRENCY,
+            tts_concurrency,
+        )
+    tts_executor = ThreadPoolExecutor(max_workers=MAX_SELECTABLE_TTS_CONCURRENCY)
     translation_executor = ThreadPoolExecutor(max_workers=4)
     try:
         from server.wallpaper_subtitle_translator import (
@@ -1273,7 +1285,7 @@ async def bootstrap(port: int = 17777) -> None:
         logger.exception("failed to configure server pre-translation cache")
     pending_actions = Queue()
     pending_sentence_items = asyncio.Queue(maxsize=3)
-    exp_tts_semaphore = asyncio.Semaphore(EXP_TTS_MAX_CONCURRENCY)
+    exp_tts_semaphore = asyncio.Semaphore(tts_concurrency)
     exp_play_condition = asyncio.Condition()
 
     # OpenClaw gateway.
@@ -1371,12 +1383,15 @@ async def bootstrap(port: int = 17777) -> None:
             if asr_manager is manager:
                 asr_manager = None
 
-    async def _start_asr_from_wake(payload=None):
+    async def _start_asr_from_wake(payload=None, *, continuous: bool | None = None):
         payload = payload or {}
+        if continuous is None and sys.platform == "win32" and wallpaper_h.is_running():
+            continuous = True
         qwen_hot_window = max(float(WAKE_AWAKE_SECONDS), float(ASR_IDLE_UNLOAD_SECONDS))
         if not await _main_voice_allowed_now("wake detected"):
-            return
-        logger.info("wake detected; entering Qwen ASR hot window for %.1fs", qwen_hot_window)
+            return {"status": "error", "error": "voice_unavailable_during_vn"}
+        logger.info("wake detected; ASR conversation mode=%s hot_window_seconds=%.1f",
+                    "continuous" if continuous else "timed", qwen_hot_window)
         try:
             from core.turn_coordinator import get_turn_coordinator
 
@@ -1394,8 +1409,9 @@ async def bootstrap(port: int = 17777) -> None:
                 await _send_wake_text(command_text, source="wake")
             except Exception:
                 logger.exception("failed to send wake inline command")
-        await asr_h.start_listening(
+        return await asr_h.start_listening(
             {
+                **({"continuous": continuous} if continuous is not None else {}),
                 "source": "wake",
                 "wake": payload,
                 "awake_seconds": qwen_hot_window,
@@ -1487,25 +1503,7 @@ async def bootstrap(port: int = 17777) -> None:
         if not isinstance(source_payload, dict):
             source_payload = {}
         kind = str(source_payload.get("kind") or "ask").strip().lower()
-        params = {
-            "text": text,
-            "source": "asr",
-            "metadata": {
-                "source": "vn_player_asr",
-                "asr": {
-                    "is_final": bool(payload.get("is_final", True)),
-                    "source_payload": source_payload,
-                },
-            },
-        }
-        if kind == "note":
-            result = await vn_h.handle(Method.VN_PLAYER_NOTE, params)
-        elif kind == "pin":
-            result = await vn_h.handle(Method.VN_PLAYER_PIN, params)
-        elif kind == "choice":
-            result = await vn_h.handle(Method.VN_CHOICE_ASK, params)
-        else:
-            result = await vn_h.handle(Method.VN_PLAYER_ASK, params)
+        result = await vn_h.handle_asr(payload)
         try:
             await bus.emit(
                 Method.ASR_STATUS,
@@ -1647,6 +1645,7 @@ async def bootstrap(port: int = 17777) -> None:
             logger.exception("failed to pause wake service after awake ASR became ready")
 
     async def _handle_asr_listening_stopped(payload: dict) -> None:
+        await vn_h.asr_stopped(payload)
         try:
             from server.speculative_turn import get_speculative_launcher
 
@@ -1735,7 +1734,6 @@ async def bootstrap(port: int = 17777) -> None:
     cooperative_chat = None
     cooperative_ledger = None
     if cooperative_chat_enabled:
-        from agent_host.provider_contract import ProviderRequirements
         from server.control_ledger import ControlLedgerStore
         from server.cooperative_chat_ingress import CooperativeChatManager
         from server.cooperative_delivery import CooperativeHostDelivery
@@ -1757,7 +1755,6 @@ async def bootstrap(port: int = 17777) -> None:
             raise RuntimeError("invalid cooperative Chat Provider requirements JSON") from exc
         if not isinstance(requirements_payload, dict):
             raise RuntimeError("cooperative Chat Provider requirements must be an object")
-        requirements = ProviderRequirements.from_dict(requirements_payload)
         try:
             additional_requirements_payload = json.loads(
                 settings.COOPERATIVE_CHAT_ADDITIONAL_REQUIREMENTS_JSON
@@ -1770,16 +1767,11 @@ async def bootstrap(port: int = 17777) -> None:
             raise RuntimeError(
                 "additional cooperative Provider requirements must be an object"
             )
-        context_requirements = {provider_id:requirements}
-        for configured_provider, payload in additional_requirements_payload.items():
-            configured_provider = str(configured_provider or "").strip().lower()
-            if (not configured_provider or not isinstance(payload, dict)
-                    or configured_provider in context_requirements
-                    or provider_runtime.get_manifest(configured_provider) is None):
-                raise RuntimeError(
-                    "additional cooperative Provider policy names an unavailable Provider"
-                )
-            context_requirements[configured_provider] = ProviderRequirements.from_dict(payload)
+        from agent_host.provider_roles import work_provider_roles, work_context_requirements
+
+        context_requirements = work_context_requirements(provider_runtime,
+            roles=work_provider_roles(), primary_policy=requirements_payload,
+            additional_policies=additional_requirements_payload)
         cooperative_ledger = ControlLedgerStore(Path(work_ledger_store.db_path))
         cooperative_deliveries = {}
 
@@ -2125,6 +2117,8 @@ async def bootstrap(port: int = 17777) -> None:
         script_id = str(line.get("script_id") or "").strip()
         source_id = session_id or script_id or line_id or f"vn-{time.time_ns()}"
         identity = "-".join(part for part in (session_id, script_id, line_id) if part)
+        if payload.get("vn_speech_segment") is not None:
+            identity += f"-segment-{int(payload['vn_speech_segment'])}"
         receipt = await deliver_narration(
             NarrationRequest(
                 request_id=f"vn-narration-{identity or time.time_ns()}",
@@ -2578,18 +2572,22 @@ async def bootstrap(port: int = 17777) -> None:
     )
     from server.character_presentation import coordinator as character_presentation
 
+    from server.wallpaper_chat import wallpaper_chat_control
+
     wallpaper_h.configure(
         project_root=Path(ROOT),
         render_bridge=_render_signal_bridge,
         wake_start_fn=lambda: wake_h.start({}),
         wake_stop_fn=lambda: wake_h.stop({}),
         canvas_action_fn=canvas_action_router.route,
-        chat_send_fn=lambda text, session_id: chat_h.send_text(
-            text,
-            provider=_current_llm_provider(),
-            session_id=session_id,
-            source="wallpaper_keyboard",
+        chat_send_fn=lambda text, session_id, visual: chat_h.send_text(
+            text, provider=_current_llm_provider(), visual=visual,
+            session_id=session_id, source="wallpaper_keyboard",
         ),
+        chat_control_fn=(lambda action: wallpaper_chat_control(
+            action, session=session_h, asr=asr_h, system=sys_h, wake=wake_h,
+            voice_start=lambda: _start_asr_from_wake(continuous=True),
+        )) if sys.platform == "win32" else None,
         ensure_chat_session_fn=lambda: session_h.ensure_current_session(
             source="wallpaper_keyboard"
         ),
@@ -2663,14 +2661,25 @@ async def bootstrap(port: int = 17777) -> None:
     # both operations run only after the Observer has subscribed.
     await work_ledger.recover_pending_terminal_results()
     await work_ledger.replay_pending_terminal_notices()
-    vn_h.configure(project_root=Path(ROOT), event_emit=bus.emit, speak_callback=_deliver_vn_narration)
+    from server.vn_tts_bridge import finish_vn_speech
+
+    vn_h.configure(
+        project_root=Path(ROOT), event_emit=bus.emit, speak_callback=_deliver_vn_narration,
+        speech_epoch=_tts_pipeline.current_tts_epoch,
+        speech_finished=finish_vn_speech,
+        asr_control=asr_h.handle, asr_state=lambda: asr_h.listening_state(include_context=True),
+        capture_game_view=lambda: vn_launch_h.handle(Method.VN_LAUNCH_CAPTURE, {}),
+    )
     vn_launch_h.configure(
         project_root=Path(ROOT),
         runtime_start=lambda params: vn_h.handle(Method.VN_START, params),
         runtime_stop=lambda params: vn_h.handle(Method.VN_STOP, params),
         runtime_status=lambda: vn_h.handle(Method.VN_STATUS, {}),
-        runtime_line=lambda params: vn_h.handle(Method.VN_LINE, params),
+        runtime_line=vn_h.submit_source_line,
         before_external_launch=_prepare_for_external_vn_launch,
+        runtime_overlay=vn_h.set_overlay_url,
+        backend_url=f"ws://127.0.0.1:{port}/ws",
+        auth_policy=auth_policy,
     )
 
     # Start only after dependency configuration, inside the owning teardown scope.
@@ -4569,8 +4578,8 @@ def _delegate_provider_selection(
             preference_policy="prefer",
         )
     default_provider = str(
-        getattr(settings, "PROVIDER_DELEGATE_DEFAULT_PROVIDER", "openclaw")
-        or "openclaw"
+        getattr(settings, "PROVIDER_DELEGATE_DEFAULT_PROVIDER", "pi")
+        or "pi"
     ).strip().lower()
     available_manifests = (
         tuple(manifests)

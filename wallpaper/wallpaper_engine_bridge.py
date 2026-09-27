@@ -31,6 +31,7 @@ from config.settings import (
     GRAPHICS_PROFILE,
     RENDER_EFFECTIVE_MAX_FPS,
     RENDER_EFFECTIVE_MAX_RESOLUTION,
+    RENDER_TEXTURE_SAMPLING,
     WALLPAPER_SFX_GATE_LOG,
     WALLPAPER_WHEEL_FORWARD,
 )
@@ -79,6 +80,7 @@ _WALLPAPER_CLIENT_ASSETS = (
     _PROJECT_ROOT / "render" / "web" / "companion_panel.html",
     _PROJECT_ROOT / "render" / "web" / "companion_panel.css",
     _PROJECT_ROOT / "render" / "web" / "companion_panel.js",
+    _PROJECT_ROOT / "render" / "web" / "companion_atlas.js",
     _PROJECT_ROOT / "render" / "web" / "companion_presentation.js",
     _PROJECT_ROOT / "render" / "web" / "wallpaper_scene.js",
     _PROJECT_ROOT / "render" / "web" / "renderer.js",
@@ -195,7 +197,7 @@ class _BridgeState:
             canvas_clients = (
                 list(self.canvas_clients)
                 if str(event.get("method") or "")
-                in {"setCanvas", "toggleCanvas", "setCanvasPresentation", "setAttention"}
+                in {"setCanvas", "toggleCanvas", "setCanvasPresentation", "setAttention", "composerEvent"}
                 else []
             )
         for q in clients + canvas_clients:
@@ -521,7 +523,10 @@ def _make_bridge_handler(
 
         def _route_chat_submit(self, payload: dict) -> dict:
             text = str(payload.get("text") or "").strip()
-            if not text:
+            action = payload.get("action", "send")
+            if action not in {"send", "status", "new_chat", "voice_start", "voice_stop", "vision_toggle", "vision_windows", "vision_select"}:
+                return {"ok": False, "error": "unsupported_chat_action"}
+            if action == "send" and not text:
                 return {"ok": False, "error": "empty_message"}
             if len(text) > 8000:
                 return {"ok": False, "error": "message_too_long"}
@@ -529,7 +534,7 @@ def _make_bridge_handler(
             if handler is None:
                 return {"ok": False, "error": "wallpaper_chat_unavailable"}
             try:
-                result = handler({"text": text})
+                result = handler({**payload, "text": text})
             except Exception as exc:
                 logger.warning("[WallpaperBridge] wallpaper chat submit failed: %s", exc)
                 return {"ok": False, "error": "wallpaper_chat_failed"}
@@ -595,7 +600,7 @@ def _make_bridge_handler(
                     self._json_response({"ok": False, "error": "unauthorized"}, 403)
                     return
                 try:
-                    result = self._route_chat_submit(self._read_json())
+                    result = self._route_chat_submit(self._read_json(limit=8 * 1024 * 1024))
                 except Exception as exc:
                     logger.warning("[WallpaperBridge] failed to parse wallpaper chat action: %s", exc)
                     result = {"ok": False, "error": "bad_request"}
@@ -733,6 +738,7 @@ class WallpaperEngineBridgeHost:
         render_params: dict[str, object] = {
             "graphicsProfile": GRAPHICS_PROFILE,
             "renderMaxFps": RENDER_EFFECTIVE_MAX_FPS,
+            "renderTextureSampling": int(RENDER_TEXTURE_SAMPLING),
             **params,
         }
         if RENDER_EFFECTIVE_MAX_RESOLUTION is not None:
@@ -784,6 +790,10 @@ class WallpaperEngineBridgeHost:
         return RENDER_EFFECTIVE_MAX_RESOLUTION
 
     @property
+    def render_texture_sampling(self) -> bool:
+        return RENDER_TEXTURE_SAMPLING
+
+    @property
     def graphics_profile(self) -> str:
         return GRAPHICS_PROFILE
 
@@ -815,6 +825,7 @@ class WallpaperEngineBridgeHost:
                 "graphicsProfile": GRAPHICS_PROFILE,
                 "renderMaxFps": RENDER_EFFECTIVE_MAX_FPS,
                 "renderMaxResolution": RENDER_EFFECTIVE_MAX_RESOLUTION,
+                "renderTextureSampling": RENDER_TEXTURE_SAMPLING,
                 "sliceHost": self._slice_host,
                 "sliceBounds": self._slice_bounds,
                 "canvasBounds": self._canvas_bounds,
@@ -1050,6 +1061,9 @@ class WallpaperEngineBridgeHost:
 
     def set_attention(self, payload: dict) -> None:
         self._event("setAttention", dict(payload or {}), replay="attention")
+
+    def composer_event(self, payload: dict) -> None:
+        self._event("composerEvent", payload)
 
     def toggle_canvas(self) -> None:
         self._event("toggleCanvas")

@@ -1,10 +1,12 @@
-﻿import { useState, useCallback, useEffect, useRef } from 'react'
+﻿import { prepareImageAttachment } from '../../../../render/web/chat_image_attachment.mjs'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Fragment, useMemo } from 'react'
 import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react'
 import ChatBubble from './ChatBubble'
+import { markRuntimeSettingsApplied, persistDesktopRuntimeSettings } from './desktopRuntimeSettings'
 import ChatSessionRail, {
   type ChatProjectSummary,
   type ChatSessionSummary,
@@ -34,6 +36,7 @@ import {
   chatTranslationCandidates,
   chatTranslationKey,
 } from './chatTranslationState'
+import { useI18n } from '../i18n'
 
 interface Props {
   send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
@@ -91,11 +94,8 @@ const CHAT_PANEL_DEFAULT_W = 560
 const CHAT_PANEL_MIN_W = 420
 const CHARACTER_MIN_W = 360
 const SPLIT_WIDTH_STORAGE_KEY = 'amadeus.render.chatWidth'
-const MULTIMODAL_CHAT_PROVIDERS = new Set(['openai', 'gemini', 'hybrid3'])
 const VISION_LONG_PRESS_MS = 560
 const DRAFT_APPS_VIEW_ID = '__draft_apps__'
-const VISUAL_ATTACHMENT_MAX_LONG_SIDE = 1280
-const VISUAL_ATTACHMENT_JPEG_QUALITY = 0.82
 const RENDER_BRIDGE_MESSAGE = 'amadeus.render.event'
 const RENDER_EVENT_METHODS = [
   'render.emotion',
@@ -126,53 +126,9 @@ function clampChatWidth(width: number, totalWidth = Number.POSITIVE_INFINITY): n
   return Math.min(Math.max(width, CHAT_PANEL_MIN_W), max)
 }
 
-function loadImageElement(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('Could not decode image'))
-    image.src = src
-  })
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error || new Error('Could not read image'))
-    reader.readAsDataURL(file)
-  })
-}
-
-async function prepareImageAttachment(file: File): Promise<VisualAttachment> {
-  if (!file.type.startsWith('image/')) {
-    throw new Error('Please choose an image file.')
-  }
-  const originalDataUrl = await readFileAsDataUrl(file)
-  const image = await loadImageElement(originalDataUrl)
-  const scale = Math.min(1, VISUAL_ATTACHMENT_MAX_LONG_SIDE / Math.max(image.naturalWidth, image.naturalHeight, 1))
-  const width = Math.max(1, Math.round(image.naturalWidth * scale))
-  const height = Math.max(1, Math.round(image.naturalHeight * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas is unavailable.')
-  ctx.drawImage(image, 0, 0, width, height)
-  const dataUrl = canvas.toDataURL('image/jpeg', VISUAL_ATTACHMENT_JPEG_QUALITY)
-  const base64 = dataUrl.split(',', 2)[1] || ''
-  const byteLength = Math.floor((base64.length * 3) / 4)
-  return {
-    name: file.name || 'image.jpg',
-    mime: 'image/jpeg',
-    dataUrl,
-    width,
-    height,
-    byteLength,
-  }
-}
 
 export default function ChatPage({ send, subscribe, connected, renderActive, renderAssetUrl }: Props) {
+  const { t } = useI18n()
   const [messages, setMessages] = useState<Message[]>([])
   const [chatTranslationEnabled, setChatTranslationEnabled] = useState(false)
   const [chatTranslations, setChatTranslations] = useState<Record<string, string>>({})
@@ -184,6 +140,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
   const [streaming, setStreaming] = useState(false)
   const [input, setInput] = useState('')
   const [provider, setProvider] = useState('deepseek')
+  const [canUseMultimodal, setCanUseMultimodal] = useState(false)
   const [chatAvatars, setChatAvatars] = useState({ user: '', assistant: '' })
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
   const [projects, setProjects] = useState<ChatProjectSummary[]>([])
@@ -205,7 +162,6 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
     title: string
   } | null>(null)
   const [asrListening, setAsrListening] = useState(false)
-  const [pixiSubmode, setPixiSubmode] = useState('graph')
   const [pendingVisualAttachment, setPendingVisualAttachment] = useState<VisualAttachment | null>(null)
   const [visionVideoMode, setVisionVideoMode] = useState(false)
   const [visionWindowPickerOpen, setVisionWindowPickerOpen] = useState(false)
@@ -231,8 +187,6 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
   const activeSessionRef = useRef('')
   const visionPressTimerRef = useRef<number | null>(null)
   const visionLongPressRef = useRef(false)
-  const canUseMultimodal = MULTIMODAL_CHAT_PROVIDERS.has(provider)
-
   const toMessages = useCallback((items: unknown): Message[] => {
     if (!Array.isArray(items)) return []
     return items
@@ -552,12 +506,14 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
     if (!connected) return
     send('system.get_config', {}).then(res => {
       if (res?.llm_provider) setProvider(String(res.llm_provider))
+      setCanUseMultimodal(res?.chat_supports_images === true)
       if (res?.vision_mode) setVisionVideoMode(String(res.vision_mode) === 'watching')
     }).catch(() => {})
 
     const unsub = subscribe('system.config', (p) => {
       const values = (p.values ?? p) as Record<string, unknown>
       if (values.llm_provider !== undefined) setProvider(String(values.llm_provider))
+      if (values.chat_supports_images !== undefined) setCanUseMultimodal(values.chat_supports_images === true)
       if (values.vision_mode !== undefined) setVisionVideoMode(String(values.vision_mode) === 'watching')
       if (values.vision_enabled !== undefined && !values.vision_enabled) setVisionVideoMode(false)
     })
@@ -570,7 +526,13 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
       setVisionWindowPickerOpen(false)
       setVisionVideoMode(prev => {
         if (prev) {
-          send('system.set_config', { values: { vision_enabled: false, vision_mode: 'off' } }).catch(() => {})
+          const values = { vision_enabled: false }
+          persistDesktopRuntimeSettings(values)
+            .then(async saved => {
+              await send('system.set_config', { values })
+              await markRuntimeSettingsApplied(values, saved.pendingRevisions)
+            })
+            .catch(() => {})
         }
         return false
       })
@@ -810,23 +772,16 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
     setVisionVideoMode(next)
     setPendingVisualAttachment(null)
     try {
-      await send('system.set_config', {
-        values: next
-          ? {
-              vision_enabled: true,
-              vision_mode: 'watching',
-              vision_provider: provider,
-              vision_scope: 'full_screen',
-            }
-          : {
-              vision_enabled: false,
-              vision_mode: 'off',
-            },
-      })
+      const values = next
+        ? { vision_enabled: true, vision_mode: 'watching', vision_scope: 'full_screen' }
+        : { vision_enabled: false }
+      const saved = await persistDesktopRuntimeSettings(values)
+      await send('system.set_config', { values })
+      await markRuntimeSettingsApplied(values, saved.pendingRevisions)
     } catch {
       setVisionVideoMode(!next)
     }
-  }, [connected, canUseMultimodal, visionVideoMode, send, provider])
+  }, [connected, canUseMultimodal, visionVideoMode, send])
 
   const loadVisionWindows = useCallback(async () => {
     setVisionWindowLoading(true)
@@ -856,42 +811,42 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
     if (!connected || !canUseMultimodal) return
     setVisionWindowError('')
     try {
-      await send('system.set_config', {
-        values: {
+      const values = {
           vision_enabled: true,
           vision_mode: visionVideoMode ? 'watching' : 'on_demand',
-          vision_provider: provider,
           vision_scope: 'selected_window',
           vision_window_handle: windowItem.hwnd,
-        },
-      })
+      }
+      const saved = await persistDesktopRuntimeSettings(values)
+      await send('system.set_config', { values })
+      await markRuntimeSettingsApplied(values, saved.pendingRevisions)
       setVisionWindows(prev => prev.map(item => ({ ...item, selected: item.hwnd === windowItem.hwnd })))
       setVisionWindowPickerOpen(false)
       setPendingVisualAttachment(null)
     } catch (error) {
       setVisionWindowError(error instanceof Error ? error.message : 'Could not switch window')
     }
-  }, [connected, canUseMultimodal, send, visionVideoMode, provider])
+  }, [connected, canUseMultimodal, send, visionVideoMode])
 
   const handleVisionFullScreenSelect = useCallback(async () => {
     if (!connected || !canUseMultimodal) return
     setVisionWindowError('')
     try {
-      await send('system.set_config', {
-        values: {
+      const values = {
           vision_enabled: true,
           vision_mode: visionVideoMode ? 'watching' : 'on_demand',
-          vision_provider: provider,
           vision_scope: 'full_screen',
           vision_window_handle: '',
-        },
-      })
+      }
+      const saved = await persistDesktopRuntimeSettings(values)
+      await send('system.set_config', { values })
+      await markRuntimeSettingsApplied(values, saved.pendingRevisions)
       setVisionWindows(prev => prev.map(item => ({ ...item, selected: false })))
       setVisionWindowPickerOpen(false)
     } catch (error) {
       setVisionWindowError(error instanceof Error ? error.message : 'Could not switch to full screen')
     }
-  }, [connected, canUseMultimodal, send, visionVideoMode, provider])
+  }, [connected, canUseMultimodal, send, visionVideoMode])
 
   const handleVisionPointerDown = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     if (!connected || !canUseMultimodal) return
@@ -939,14 +894,21 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
   }, [canUseMultimodal])
 
   const handleProviderChange = useCallback(async (v: string) => {
+    let persisted = false
     try {
+      const saved = await persistDesktopRuntimeSettings({ llm_provider: v })
+      persisted = saved.persisted
       const res = await send('system.set_config', { values: { llm_provider: v } })
+      await markRuntimeSettingsApplied({ llm_provider: v }, saved.pendingRevisions)
       const values = res.values as Record<string, unknown> | undefined
       if (values?.llm_provider) setProvider(String(values.llm_provider))
+      if (values?.chat_supports_images !== undefined) setCanUseMultimodal(values.chat_supports_images === true)
     } catch {
       setMessages(prev => [...prev, {
         role: 'system',
-        text: 'Model switch failed; wait for the current reply to finish and try again.',
+        text: persisted
+          ? 'Default model saved for the next backend start; the current conversation still uses the previous model.'
+          : 'Model switch failed; wait for the current reply to finish and try again.',
       }])
     }
   }, [send])
@@ -1238,21 +1200,12 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
     }
   }, [send])
 
-  const handlePixiSubmodeCycle = useCallback(() => {
-    setPixiSubmode(prev => {
-      const next = prev === 'graph' ? 'sprite' : prev === 'sprite' ? 'hybrid' : 'graph'
-      send('expression.set_backend', { backend: 'graph', submode: next }).catch(() => {})
-      return next
-    })
-  }, [send])
-
   const handleSplitPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!renderActive) return
     event.preventDefault()
     setIsSplitResizing(true)
   }, [renderActive])
 
-  const pixiSubmodeLabel = pixiSubmode === 'graph' ? 'SpriteForge graph' : pixiSubmode === 'sprite' ? 'Sprite frames' : 'Live2D idle + frames'
   const activeContext = sessions.find(session => session.id === activeSession)?.context || null
   const projectView = projectViewId === DRAFT_APPS_VIEW_ID
     ? { projectId: '', name: 'Drafts' }
@@ -1266,7 +1219,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
 
   const visualButtonDisabled = !connected || !canUseMultimodal
   const visualButtonTitle = !canUseMultimodal
-    ? 'Select OpenAI, Gemini, or hybrid3 to use visual input'
+    ? 'Select an image-capable model, such as DeepSeek Flash, OpenAI, or Gemini'
     : visionVideoMode
       ? 'Global vision watching is on. Hold to turn it off. Right-click to choose a window.'
       : pendingVisualAttachment
@@ -1286,12 +1239,6 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
   const comboCls = `text-[10px] border border-[var(--border)] rounded-md px-2
     bg-[var(--surface)] text-[var(--text)] outline-none
     hover:border-[var(--border-strong)]`
-
-  const toolBtnStyle = (size: number): React.CSSProperties => ({
-    width: size, height: size, display: 'flex', alignItems: 'center',
-    justifyContent: 'center', border: 'none', background: 'transparent',
-    color: 'var(--muted)', cursor: 'pointer', borderRadius: 8,
-  })
 
   /* Chat panel (right side) */
   const chatPanel = (
@@ -1360,12 +1307,12 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
         style={{ backgroundColor: 'var(--surface)', borderBottom: '1px solid var(--border)', padding: '5px 14px' }}
       >
         <span className="flex-1 text-[11px] font-[500] truncate" style={{ color: 'var(--text)' }}>
-          {activeSession ? sessions.find(s => s.id === activeSession)?.title ?? 'Chat' : 'Chat'}
+          {activeSession ? sessions.find(s => s.id === activeSession)?.title ?? t('Chat') : t('Chat')}
         </span>
         {projectCorrectionOpen ? (
           <select
             autoFocus
-            aria-label="Move chat to Project"
+            aria-label={t('Move chat to Project')}
             defaultValue=""
             onBlur={() => setProjectCorrectionOpen(false)}
             onChange={event => {
@@ -1376,8 +1323,8 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
             className={comboCls}
             style={{ width: 148, height: 28 }}
           >
-            <option value="" disabled>Move chat…</option>
-            <option value="__draft__">Draft</option>
+            <option value="" disabled>{t('Move chat…')}</option>
+            <option value="__draft__">{t('Draft')}</option>
             {projects.map(project => (
               <option key={project.projectId} value={project.projectId}>{project.name}</option>
             ))}
@@ -1385,10 +1332,10 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
         ) : (
           <div
             className="group flex items-center shrink-0"
-            aria-label="Current chat project"
+            aria-label={t('Current chat project')}
             title={activeContext?.projectId
               ? `This chat is bound to ${activeContext.projectName}`
-              : 'This is a default Draft chat'}
+              : t('This is a default Draft chat')}
             style={{
               height: 28,
               padding: '0 8px',
@@ -1401,28 +1348,28 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
             }}
           >
             <span className="truncate" style={{ maxWidth: 120 }}>
-              {activeContext?.projectId ? activeContext.projectName : 'Draft'}
+              {activeContext?.projectId ? activeContext.projectName : t('Draft')}
             </span>
             {!activeContext?.projectId && activeContext?.canPromoteToProject && (
               <button
                 type="button"
                 onClick={() => { void promoteActiveDraft() }}
-                title="Promote this Draft to a Project"
+                title={t('Promote this Draft to a Project')}
                 className="opacity-0 group-hover:opacity-100 border-none bg-transparent cursor-pointer"
                 style={{ color: 'var(--accent)', fontSize: 10, fontWeight: 600 }}
               >
-                Promote
+                {t('Promote')}
               </button>
             )}
             {activeSession && (
               <button
                 type="button"
                 onClick={() => setProjectCorrectionOpen(true)}
-                title="Move this chat and preserve its history. Existing Work keeps its original Project; moving waits for active Work to finish."
+                title={t('Move this chat and preserve its history. Existing Work keeps its original Project; moving waits for active Work to finish.')}
                 className="opacity-0 group-hover:opacity-100 border-none bg-transparent cursor-pointer"
                 style={{ color: 'var(--faint)', fontSize: 10 }}
               >
-                Move
+                {t('Move')}
               </button>
             )}
           </div>
@@ -1430,8 +1377,8 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
         <button
           type="button"
           onClick={() => { void handleNewSession() }}
-          title="New chat"
-          aria-label="New chat"
+          title={t('New chat')}
+          aria-label={t('New chat')}
           className="flex items-center justify-center rounded-md border-none bg-transparent text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--text)] cursor-pointer shrink-0"
           style={{ width: 30, height: 30, borderRadius: 6 }}
         >
@@ -1448,7 +1395,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
       >
         <div className="flex flex-col" style={{ padding: '14px 0 12px 0' }}>
           {messages.length === 0 && !streaming && (
-            <p className="text-center mt-20" style={{ color: 'var(--faint)', fontSize: 13 }}>Type a message to start.</p>
+            <p className="text-center mt-20" style={{ color: 'var(--faint)', fontSize: 13 }}>{t('Type a message to start.')}</p>
           )}
           {messages.map((msg, i) => {
             const key = `${msg.role}-${msg.turnId || 'local'}-${i}`
@@ -1548,8 +1495,8 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                 <button
                   type="button"
                   onClick={() => setArtifactContext(null)}
-                  title="Dismiss Artifact context label"
-                  aria-label="Dismiss Artifact context label"
+                  title={t('Dismiss Artifact context label')}
+                  aria-label={t('Dismiss Artifact context label')}
                   style={{ marginLeft: 'auto', border: 'none', background: 'transparent', color: 'var(--faint)', cursor: 'pointer' }}
                 >
                   x
@@ -1578,7 +1525,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                 </span>
                 <button
                   type="button"
-                  title="Remove image"
+                  title={t('Remove image')}
                   onClick={() => setPendingVisualAttachment(null)}
                   style={{
                     marginLeft: 'auto',
@@ -1600,7 +1547,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
               onKeyDown={handleKeyDown}
               placeholder={artifactContext
                 ? `Ask Amadeus about ${artifactContext.title}…`
-                : 'Type a message or press mic to speak...'}
+                : t('Type a message or press mic to speak...')}
               disabled={!connected || !sessionReady || sessionSwitching} rows={3}
               className="w-full resize-none text-[12px] leading-[150%] placeholder-[var(--faint)] disabled:opacity-40"
               style={{ height: 64, fontFamily: 'var(--font-cjk)', color: 'var(--text)', backgroundColor: 'transparent', border: 'none', outline: 'none', padding: 0 }}
@@ -1613,8 +1560,8 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
               <div className="flex-1" />
 
               <button onClick={handleMicToggle}
-                title={asrListening ? 'Stop voice input' : 'Start voice input'}
-                aria-label={asrListening ? 'Stop voice input' : 'Start voice input'}
+                title={t(asrListening ? 'Stop voice input' : 'Start voice input')}
+                aria-label={t(asrListening ? 'Stop voice input' : 'Start voice input')}
                 className="flex items-center justify-center shrink-0 cursor-pointer transition-colors" disabled={!connected || !sessionReady || sessionSwitching}
                 style={{
                   width: 36, height: 36, borderRadius: 18,
@@ -1639,8 +1586,8 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
 
               <button
                 type="button"
-                title={visualButtonTitle}
-                aria-label={visualButtonTitle}
+                title={t(visualButtonTitle)}
+                aria-label={t(visualButtonTitle)}
                 disabled={visualButtonDisabled}
                 onPointerDown={handleVisionPointerDown}
                 onPointerUp={handleVisionPointerUp}
@@ -1736,7 +1683,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                     fontSize: 11,
                   }}
                 >
-                  <span className="font-[600]" style={{ color: 'var(--text)' }}>Monitor window</span>
+                  <span className="font-[600]" style={{ color: 'var(--text)' }}>{t('Monitor window')}</span>
                   <button
                     type="button"
                     onClick={() => loadVisionWindows().catch(() => {})}
@@ -1751,7 +1698,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                       padding: '3px 7px',
                     }}
                   >
-                    Refresh
+                    {t('Refresh')}
                   </button>
                   <button
                     type="button"
@@ -1766,12 +1713,12 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                       padding: '3px 7px',
                     }}
                   >
-                    Full screen
+                    {t('Full screen')}
                   </button>
                   <button
                     type="button"
                     onClick={() => setVisionWindowPickerOpen(false)}
-                    title="Close"
+                    title={t('Close')}
                     style={{
                       border: 'none',
                       background: 'transparent',
@@ -1787,7 +1734,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                 <div className="chat-scroll-area" style={{ maxHeight: 184, overflowY: 'auto', padding: 5 }}>
                   {visionWindowLoading && (
                     <div style={{ padding: '10px 8px', color: 'var(--faint)', fontSize: 11 }}>
-                      Loading windows...
+                      {t('Loading windows...')}
                     </div>
                   )}
                   {!visionWindowLoading && visionWindowError && (
@@ -1869,49 +1816,9 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
           />
           {CRT_WORK_WIDGET_DEMO_ENABLED && <CrtWorkWidget />}
 
-          {/* Character tools bar (58px, light theme) */}
-          <div
-            className="flex items-center shrink-0"
-            style={{
-              height: 58, backgroundColor: 'var(--surface)',
-              borderTop: '1px solid var(--border)',
-              padding: '0 14px', gap: 10,
-            }}
-          >
-            <button title="Switch to VTS render"
-              style={toolBtnStyle(42)}
-              onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'toggle-render' }))}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--surface-alt)' }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent' }}
-            >
-              <FluentIcon name="Movie" size={18} />
-            </button>
-            <div className="flex-1" />
-            <button title={`Current: ${pixiSubmodeLabel}. Click to switch.`}
-              style={toolBtnStyle(42)}
-              onClick={handlePixiSubmodeCycle}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--surface-alt)' }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent' }}
-            >
-              <FluentIcon name="Album" size={18} />
-            </button>
-            <button title="Open expression presets"
-              style={toolBtnStyle(42)}
-              onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'expressions' }))}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--surface-alt)' }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent' }}
-            >
-              <FluentIcon name="Palette" size={18} />
-            </button>
-            <button title="Open transparent overlay"
-              style={toolBtnStyle(42)}
-              onClick={() => send('expression.set_backend', { backend: 'graph', overlay: true }).catch(() => {})}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--surface-alt)' }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.backgroundColor = 'transparent' }}
-            >
-              <FluentIcon name="Pin" size={18} />
-            </button>
-          </div>
+          {/* The legacy Render footer was retired in favor of the single
+              Render toggle in the primary sidebar. The protocol endpoints
+              remain available to direct integrations and diagnostic routes. */}
         </div>
       )}
 
@@ -1920,7 +1827,7 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
           className={`render-chat-splitter ${isSplitResizing ? 'active' : ''}`}
           role="separator"
           aria-orientation="vertical"
-          title="Resize render and chat panels"
+          title={t('Resize render and chat panels')}
           onPointerDown={handleSplitPointerDown}
         />
       )}
