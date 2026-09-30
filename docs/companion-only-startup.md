@@ -11,10 +11,23 @@ wallpaper host, the Electron Slice, the Canvas surface, or a visible main UI.
 
 | Surface | Command |
 |---|---|
-| Desktop launcher | `run_amadeus_companion.bat` |
+| Desktop launcher | `run_amadeus_companion.bat` (runs the built `electron/dist`, no Vite) |
 | Electron dev | `electron . --companion` (or `AMADEUS_COMPANION=1`) |
 | Backend only | `python -m server.app --port 17777 --companion` |
 | Environment | `AMADEUS_COMPANION=1` |
+
+`run_amadeus_companion.bat` uses the built main process, so it starts faster and
+does not need a Vite dev server. It builds once if `electron/dist` is missing.
+The dev path (`npm run electron:dev`) still works and additionally serves the
+renderer from Vite.
+
+Launch it from an ordinary desktop session — a shortcut, Explorer, or a normal
+terminal. **Do not launch it from inside a sandboxed or agent terminal**:
+Electron exits there with `0x80000003` before its JavaScript starts, and a
+three-line minimal Electron app fails the same way, so it is the terminal, not
+this application. Verify the environment with
+`electron\node_modules\electron\dist\electron.exe --version`, which prints
+`v44.x.x` on a working session.
 
 `--companion` / `AMADEUS_COMPANION=1` resolve to `StartupMode = 'companion'` in
 `electron/src/main/startupMode.ts`. Companion mode is checked before the Windows
