@@ -53,7 +53,7 @@ class PortraitOverlayTk:
     """Window and local message transport; animation lives in AtlasPlayer."""
 
     def __init__(self, *, host: str = "127.0.0.1", port: int = 8788, x: int = 60, y: int = 80,
-                 backend_url: str = "", on_close: str = "exit"):
+                 backend_url: str = "", on_close: str = "exit", companion_controls: bool = False):
         self._on_close = str(on_close or "exit").strip().lower()
         if sys.platform == "win32":
             # Render at monitor resolution instead of letting Windows enlarge a 96-DPI bitmap.
