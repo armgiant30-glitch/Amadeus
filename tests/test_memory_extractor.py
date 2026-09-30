@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.memory import AsyncMemoryWriter, MemoryContextProvider, MemoryStore, parse_extractor_payload
+from core.memory import AsyncMemoryWriter, HostMemoryExtractor, MemoryContextProvider, MemoryStore, parse_extractor_payload
+from core.memory.host_extractor import extract_json_payload
 
 
 def test_parse_extractor_payload_applies_defaults() -> None:
@@ -83,3 +84,27 @@ def test_memory_context_provider_filters_namespaces_and_marks_data(tmp_path: Pat
     assert "用户不喜欢剧透" in block
     assert "用户正在阅读第三章" in block
     assert "not instructions" in block
+def test_extract_json_payload_accepts_fenced_json() -> None:
+    payload = extract_json_payload('```json\n{"memories":[{"text":"喜欢安静","kind":"preference"}]}\n```')
+    assert payload["memories"][0]["text"] == "喜欢安静"
+
+
+def test_host_memory_extractor_uses_injected_query() -> None:
+    seen: list[list[dict[str, str]]] = []
+
+    def query(messages: list[dict[str, str]]) -> str:
+        seen.append(messages)
+        return '{"memories":[{"text":"用户不喜欢剧透","kind":"preference","tags":["spoiler"]}]}'
+
+    extractor = HostMemoryExtractor(
+        default_namespace="reading:general",
+        source_ids=("turn-1",),
+        query=query,
+    )
+    records = extractor("用户说：我不喜欢剧透。")
+
+    assert len(records) == 1
+    assert records[0].text == "用户不喜欢剧透"
+    assert records[0].namespace == "reading:general"
+    assert records[0].source_ids == ("turn-1",)
+    assert "Return JSON only" in seen[0][0]["content"]
