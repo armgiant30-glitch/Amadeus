@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.companion import CompanionContextBuilder
+from core.companion import CompanionContextBuilder, CompanionRuntime
 from core.memory import MemoryContextProvider, MemoryStore, parse_extractor_payload
 from core.reading import ReadingChunk, ReadingContext, ReadingSessionStore
 
@@ -84,3 +84,32 @@ def test_chat_runtime_has_optional_extra_context_for_companion() -> None:
         extra_context="<memory_data>用户不喜欢剧透</memory_data>",
     )
     assert "用户不喜欢剧透" in _turn_role_grounding(state)
+def test_companion_runtime_composes_services(tmp_path: Path) -> None:
+    def extractor(_text: str):
+        return parse_extractor_payload(
+            [{"text": "用户不喜欢剧透", "kind": "preference"}],
+            default_namespace="general",
+        )
+
+    runtime = CompanionRuntime(tmp_path, extractor=extractor, reading_server_port=0)
+    try:
+        runtime.ingest_reading_event(
+            {
+                "book_id": "book-1",
+                "chapter": "第三章",
+                "cursor": 100,
+                "page": 42,
+            }
+        )
+        runtime.remember_turn(
+            "book-1",
+            user_message="我不喜欢剧透",
+            assistant_message="记住了",
+        )
+        assert runtime.writer.wait_idle(timeout=2.0)
+
+        block = runtime.context_block("剧透", book_id="book-1")
+        assert "用户不喜欢剧透" in block
+        assert "book-1" in block
+    finally:
+        runtime.close()
