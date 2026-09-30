@@ -890,6 +890,9 @@ def _turn_role_grounding(st: "_TurnState") -> str:
             parts.append(briefing)
     except Exception as exc:
         logger.debug(f"AUIP role capability registry unavailable: {exc}")
+    extra_context = str(getattr(st, "extra_context", "") or "").strip()
+    if extra_context:
+        parts.append(extra_context[:12000])
     return "\n\n".join(parts)
 
 
@@ -1073,7 +1076,7 @@ class _TurnState:
         "auip_cross_axis_ambiguous",
         "auip_role_branch_recorded", "auip_role_branch_isolated",
         "interaction_branch_routing_lease",
-        "turn_admission", "history_snapshot",
+        "turn_admission", "history_snapshot", "extra_context",
     )
 
     def __init__(
@@ -1089,6 +1092,7 @@ class _TurnState:
         interaction_branch_routing_lease: Mapping[str, Any] | None = None,
         turn_admission: TurnAdmissionRecord | None = None,
         history_snapshot: ConversationHistory | None = None,
+        extra_context: str = "",
     ) -> None:
         self.full_response = ""
         # Same text as full_response plus the DELEGATE tags the model actually
@@ -1114,6 +1118,7 @@ class _TurnState:
         self.character_reference = ""
         self.session_id = str(session_id or "")
         self.turn_admission = turn_admission
+        self.extra_context = str(extra_context or "").strip()
         self.history_snapshot = (
             conversation_history.snapshot() if history_snapshot is None else history_snapshot
         )
@@ -1400,6 +1405,7 @@ class ChatRuntime:
         interaction_branch_routing_lease: Mapping[str, Any] | None = None,
         turn_admission: TurnAdmissionRecord | None = None,
         history_snapshot: ConversationHistory | None = None,
+        extra_context: str = "",
     ):
         """流式 LLM 查询：分句、启动预翻译、提交待播队列，并等待播放完成。"""
         require_legacy_turn_authority(turn_admission)
@@ -1471,6 +1477,7 @@ class ChatRuntime:
             control_prior_messages=tuple(history_snapshot.dialog) if enable_conv else (),
             interaction_branch_routing_lease=interaction_branch_routing_lease,
             turn_admission=turn_admission, history_snapshot=history_snapshot,
+            extra_context=extra_context,
         )
         _ensure_turn_admission_observed(st)
 

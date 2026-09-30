@@ -205,6 +205,7 @@ work_status_narrator = None
 # Companion-only owns exactly one portrait card process for this backend
 # lifetime. None means the ordinary desktop/wallpaper startup path.
 companion_card = None
+companion_context_runtime = None
 # Focus is applied synchronously at the dispatcher boundary, while its spoken
 # post-condition waits for the shared character lane in a tracked background
 # task.  This keeps a compound "switch and edit" from delaying Provider start.
@@ -306,7 +307,7 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
     global vts_manager, player, playback_manager, tts_runtime, asr_manager, wake_service
     global tts_executor, translation_executor, pending_actions, pending_sentence_items
     global exp_tts_semaphore, exp_play_condition, output_idle_probe, host_readonly_voice_sink
-    global work_status_narrator, companion_card
+    global work_status_narrator, companion_card, companion_context_runtime
 
     auth_policy = LocalAuthPolicy.from_environment(os.environ)
     from server.companion_runtime import desktop_credential_environment
@@ -321,6 +322,14 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
         )
     if companion_only:
         logger.info("companion-only mode: portrait card, local voice, no Work or AUIP context")
+        from core.companion import CompanionRuntime
+
+        companion_context_runtime = CompanionRuntime(Path(ROOT) / "runtime" / "companion")
+        try:
+            reading_port = await asyncio.to_thread(companion_context_runtime.start_reading_server)
+            logger.info("[companion] reader adapter listening on 127.0.0.1:%s", reading_port)
+        except OSError as error:
+            logger.warning("[companion] reader adapter unavailable: %s", error)
 
     e2e_no_tts = str(os.environ.get("AMADEUS_E2E_NO_TTS") or "").strip().lower() in {
         "1",
@@ -2776,6 +2785,11 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
                     await companion_card.stop()
                 except Exception:
                     logger.exception("Companion card shutdown failed")
+            if companion_context_runtime is not None:
+                try:
+                    await asyncio.to_thread(companion_context_runtime.close)
+                except Exception:
+                    logger.exception("Companion memory/reading shutdown failed")
             try:
                 await chat_h.close()
             except Exception:
@@ -2908,7 +2922,22 @@ async def _stream_llm_query_adapter(
         False if e2e_no_tts else _pre_translation_enabled()
     )
 
-    return await rt.stream_llm_query(
+    extra_context = ""
+    book_id = ""
+    if companion_context_runtime is not None:
+        latest_context = companion_context_runtime.reading.latest_context()
+        book_id = latest_context.book_id if latest_context is not None else ""
+        chunks = companion_context_runtime.reading.list_chunks(book_id) if book_id else ()
+        try:
+            extra_context = companion_context_runtime.context_block(
+                text,
+                book_id=book_id or None,
+                chunks=chunks,
+            )
+        except Exception as error:
+            logger.debug("[companion] context assembly unavailable: %s", error)
+
+    response = await rt.stream_llm_query(
         text,
         gui_callback=gui_callback,
         preserve_emotion=preserve_emotion,
@@ -2918,7 +2947,19 @@ async def _stream_llm_query_adapter(
         interaction_branch_routing_lease=interaction_branch_routing_lease,
         turn_admission=turn_admission,
         history_snapshot=history_snapshot,
+        extra_context=extra_context,
     )
+    if (
+        companion_context_runtime is not None
+        and response
+        and not str(response).startswith("LLM API Error:")
+    ):
+        companion_context_runtime.remember_conversation(
+            user_message=text,
+            assistant_message=str(response),
+            book_id=book_id or None,
+        )
+    return response
 
 
 async def _run_work_observer_llm(
