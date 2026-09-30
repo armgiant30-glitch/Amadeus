@@ -189,7 +189,7 @@ def main() -> int:
         check(
             "a Chinese sentence sharing a word reaches the preference (owner: core/memory/store.py)",
             any(record.text.startswith("用户不喜欢") for record in cjk_sentence),
-            f"returned {len(cjk_sentence)} record(s)",
+            f"returned {len(cjk_sentence)} record(s); the answer is a lexical query shape, see reports/dsh-integration.md",
         )
 
         # 5. context_block composes reading state, spoiler boundary and memory.
@@ -206,7 +206,7 @@ def main() -> int:
         check("context block contains the reading session", "<reading_context>" in block)
         check("context block contains the spoiler cursor", "spoiler_cursor=12345" in block)
         check("context block contains the selected chunk", "ch-1" in block)
-        check("context block contains remembered data",
+        check("context block contains remembered data when the query shares a memory word",
               "<memory_data>" in block and "剧透" in block)
 
         # 6. A chunk past the cursor is refused rather than rendered.
