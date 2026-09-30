@@ -53,7 +53,8 @@ class PortraitOverlayTk:
     """Window and local message transport; animation lives in AtlasPlayer."""
 
     def __init__(self, *, host: str = "127.0.0.1", port: int = 8788, x: int = 60, y: int = 80,
-                 backend_url: str = ""):
+                 backend_url: str = "", on_close: str = "exit"):
+        self._on_close = str(on_close or "exit").strip().lower()
         if sys.platform == "win32":
             # Render at monitor resolution instead of letting Windows enlarge a 96-DPI bitmap.
             ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
@@ -105,6 +106,7 @@ class PortraitOverlayTk:
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
         self.root.bind("<ButtonPress-3>", lambda _event: self.close())
+        self._on_close = str(on_close or "exit").strip().lower()
         self._controls = None
         self._control_state = {"connected": False, "inputs": {}, "pending": False, "error": ""}
         self._controls_visible = False
@@ -146,7 +148,7 @@ class PortraitOverlayTk:
                            {"status": "ok", "application": "amadeus.vn.overlay", "visible": shell.visible})
 
             def do_POST(self):
-                if self.path not in {"/reaction", "/visibility"}:
+                if self.path not in {"/reaction", "/visibility", "/focus"}:
                     self.reply(404, {"error": "unknown endpoint"})
                     return
                 try:
@@ -178,6 +180,7 @@ class PortraitOverlayTk:
         self._poll_timer = self.root.after(40, self._poll)
         self._scan_timer = self.root.after(50, self._scan_tick)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self._backend_url = str(backend_url or "")
 
     def close(self):
         for name in ("_poll_timer", "_layout_timer", "_hover_timer", "_scan_timer"):
@@ -187,7 +190,14 @@ class PortraitOverlayTk:
                 setattr(self, name, None)
         if self._controls:
             self._controls.close()
+        self._report_close()
         self.root.destroy()
+
+    def _report_close(self, post=None):
+        """Companion mode owns the card process; report the user's close once."""
+        from render.vn_overlay_close import post_close
+
+        post_close(getattr(self, "_on_close", "exit"), getattr(self, "_backend_url", ""), post=post)
 
     def _schedule_layout(self, *_args):
         if self._layout_timer is None:
@@ -366,6 +376,8 @@ class PortraitOverlayTk:
                 self.visible = payload["visible"]
                 self.root.deiconify() if self.visible else self.root.withdraw()
                 self._schedule_hover()
+            elif path == "/focus":
+                self._focus_card()
             else:
                 self.apply_reaction(payload)
         if self._controls:
@@ -374,6 +386,17 @@ class PortraitOverlayTk:
                 self._control_state = state
                 self._draw_controls()
         self._poll_timer = self.root.after(40, self._poll)
+
+    def _focus_card(self):
+        """Bring an already running card to the front for a repeated launch."""
+        self.visible = True
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
+        self._schedule_hover()
 
     def run(self):
         try:

@@ -157,9 +157,12 @@ def main():
     parser.add_argument("--backend-url", default="", help="Local backend /ws endpoint for VN session controls")
     parser.add_argument("--x", type=int, default=60)
     parser.add_argument("--y", type=int, default=80)
+    parser.add_argument("--on-close", choices=("exit", "card-close"), default="exit",
+                        help="Companion mode reports the user's close to the owning backend")
     args = parser.parse_args()
     overlay = overlay_class()(lite_dir=args.lite_dir, static_idle=args.static_idle,
-                              host=args.host, port=args.port, x=args.x, y=args.y, backend_url=args.backend_url)
+                              host=args.host, port=args.port, x=args.x, y=args.y,
+                              backend_url=args.backend_url, on_close=args.on_close)
     return overlay.run()
 
 

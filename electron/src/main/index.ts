@@ -23,7 +23,8 @@ import {
 } from './wallpaperCanvasLifecycle.js'
 import { desktopPointHitsWindowRegions } from './wallpaperHitTesting.js'
 import { wallpaperWindowPolicy } from './wallpaperWindowPolicy.js'
-import { isWallpaperStartup } from './startupMode.js'
+import { resolveStartupMode, type StartupMode } from './startupMode.js'
+import { CompanionTray } from './companionTray.js'
 import { managesWindowsWallpaper, recoverWindowsWallpaperHostExit, WINDOWS_WALLPAPER_STOP_TIMEOUT_MS, stopWallpaperForRenderer, WindowsWallpaperSession, windowsWallpaperDependencies } from './windowsWallpaper.js'
 import { WindowsWallpaperTray } from './windowsWallpaperTray.js'
 import { ApplicationLifecycle } from './appLifecycle.js'
@@ -65,7 +66,16 @@ Menu.setApplicationMenu(menuTemplate ? Menu.buildFromTemplate(menuTemplate) : nu
 // development port. NODE_ENV is not guaranteed to be set by electron-builder,
 // so packaging identity is the owning security boundary.
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production'
-const windowsWallpaper = managesWindowsWallpaper(process.platform, process.env)
+// Resolve this launch's surface set once. Companion-only is an explicit startup
+// mode: it never owns the wallpaper host, Slice, Canvas or a visible main window.
+const STARTUP_MODE: StartupMode = resolveStartupMode(
+  process.argv,
+  process.env,
+  process.platform,
+  (desktopSettings.snapshot(process.env).values as Record<string, string>).AMADEUS_WINDOWS_STARTUP_MODE,
+)
+const COMPANION_ONLY = STARTUP_MODE === 'companion'
+const windowsWallpaper = STARTUP_MODE === 'wallpaper' && managesWindowsWallpaper(process.platform, process.env)
   ? new WindowsWallpaperSession({
       ...windowsWallpaperDependencies(PROJECT_ROOT, process.resourcesPath, app.isPackaged),
       status: status => {
@@ -78,6 +88,7 @@ const windowsWallpaper = managesWindowsWallpaper(process.platform, process.env)
 
 let mainWindow: BrowserWindow | null = null
 let windowsWallpaperTray: WindowsWallpaperTray | null = null
+let companionTray: CompanionTray | null = null
 let workGlowWindow: BrowserWindow | null = null
 let workPanelWindow: BrowserWindow | null = null
 let electronSliceWindow: BrowserWindow | null = null
@@ -246,15 +257,65 @@ function wantsWorkOverlay(args = process.argv): boolean {
   return args.includes('--work-overlay') || process.env.AMADEUS_WORK_OVERLAY === '1'
 }
 
-let wallpaperStartup: boolean | undefined
-function wantsWallpaper(): boolean {
-  // Resolve once per launch; changing the GUI preference must not alter the
-  // current window's close behavior or activate wallpaper halfway through use.
-  if (wallpaperStartup === undefined) {
-    const values = desktopSettings.snapshot(process.env).values as Record<string, string>
-    wallpaperStartup = isWallpaperStartup(process.argv, process.env, process.platform, values.AMADEUS_WINDOWS_STARTUP_MODE)
-  }
-  return wallpaperStartup
+// Companion-only control surface. The backend owns the card process; Electron
+// only asks that owner to show, hide, or report it.
+function companionRequest(pathname: string, body?: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body), 'utf8')
+    const request = http.request({
+      hostname: '127.0.0.1',
+      port: BACKEND_PORT,
+      path: pathname,
+      method: payload ? 'POST' : 'GET',
+      timeout: 6000,
+      headers: {
+        [BACKEND_TOKEN_HEADER]: BACKEND_TOKEN,
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
+      },
+    }, (response) => {
+      let raw = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk: string) => { if (raw.length < 8192) raw += chunk })
+      response.on('end', () => {
+        if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+          resolve(null)
+          return
+        }
+        try { resolve(JSON.parse(raw) as Record<string, unknown>) } catch { resolve(null) }
+      })
+    })
+    request.on('timeout', () => { request.destroy(); resolve(null) })
+    request.on('error', () => resolve(null))
+    if (payload) request.write(payload)
+    request.end()
+  })
+}
+
+async function showCompanionCard(): Promise<boolean> {
+  const result = await companionRequest('/companion/card/focus')
+  const shown = result?.ok === true
+  companionTray?.setVisible(shown)
+  return shown
+}
+
+async function hideCompanionCard(): Promise<boolean> {
+  const result = await companionRequest('/companion/card/visibility', { visible: false })
+  companionTray?.setVisible(result?.ok !== true)
+  return result?.ok === true
+}
+
+function ensureCompanionTray(): void {
+  if (companionTray) return
+  companionTray = new CompanionTray(APP_ICON_PATH, {
+    show: () => { void showCompanionCard() },
+    hide: () => { void hideCompanionCard() },
+    quit: () => app.quit(),
+  })
+}
+
+/** Companion-only hides the main window, so it always needs a tray owner. */
+function ensureCompanionTrayIfNeeded(): void {
+  if (COMPANION_ONLY) ensureCompanionTray()
 }
 
 // Python backend management.
@@ -363,6 +424,9 @@ async function waitForBackendReady(timeoutMs = 120_000): Promise<void> {
       return
     }
     if (health === 'foreign') {
+      // A companion launch restarted by the user adopts the backend launch
+      // that already owns the port; ordinary launches still refuse it.
+      if (COMPANION_ONLY && await companionBackendAvailable()) return
       throw new Error(`port ${BACKEND_PORT} is owned by another backend instance`)
     }
     if (pythonProcess && (pythonProcess.exitCode !== null || pythonProcess.signalCode !== null)) {
@@ -416,6 +480,28 @@ function waitForProcessExit(proc: ChildProcess, timeoutMs: number): Promise<bool
   })
 }
 
+/** An already-answering Amadeus backend, whatever launch it belongs to. */
+function companionBackendAvailable(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { hostname: '127.0.0.1', port: BACKEND_PORT, path: '/health', timeout: 800 },
+      (res) => {
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => { if (body.length < 4096) body += chunk })
+        res.on('end', () => {
+          try {
+            const payload = JSON.parse(body) as { instance_nonce?: unknown }
+            resolve(res.statusCode === 200 && Boolean(payload.instance_nonce))
+          } catch { resolve(false) }
+        })
+      },
+    )
+    req.on('timeout', () => { req.destroy(); resolve(false) })
+    req.on('error', () => resolve(false))
+  })
+}
+
 async function startBackend(): Promise<void> {
   const health = await backendHealthStatus()
   if (health === 'ready') {
@@ -430,13 +516,21 @@ async function startBackend(): Promise<void> {
     return
   }
   if (health === 'foreign') {
+    // Companion-only has no second surface to fall back to. Another Amadeus
+    // backend already owns the port (a desktop launch, or a companion launch
+    // this process restarted): reuse it and keep the single card it owns.
+    if (COMPANION_ONLY && await companionBackendAvailable()) {
+      backendOwned = false
+      console.log(`[electron] companion backend already available on ${BACKEND_WS}; reusing it`)
+      return
+    }
     backendOwned = false
     throw new Error(`port ${BACKEND_PORT} is owned by another backend instance`)
   }
 
   const python = getPythonCommand()
 
-  console.log(`[electron] starting backend: ${python} -m server.app --port ${BACKEND_PORT}`)
+  console.log(`[electron] starting backend: ${python} -m server.app --port ${BACKEND_PORT}${COMPANION_ONLY ? ' --companion' : ''}`)
   console.log(`[electron] project root: ${PROJECT_ROOT}`)
 
   // AEC (realtime WebRTC echo cancellation) is disabled by default. The
@@ -455,7 +549,10 @@ async function startBackend(): Promise<void> {
     ...backendEnvironment,
     ...process.env,
   }
-  pythonProcess = spawn(python, ['-m', 'server.app', '--port', String(BACKEND_PORT)], {
+  pythonProcess = spawn(python, [
+    '-m', 'server.app', '--port', String(BACKEND_PORT),
+    ...(COMPANION_ONLY ? ['--companion'] : []),
+  ], {
     cwd: PROJECT_ROOT,
     env: {
       ...backendProcessEnvironment,
@@ -466,6 +563,7 @@ async function startBackend(): Promise<void> {
       AMADEUS_BACKEND_AUTH_MODE: 'required',
       AMADEUS_BACKEND_TOKEN: BACKEND_TOKEN,
       AMADEUS_BACKEND_INSTANCE_NONCE: BACKEND_INSTANCE_NONCE,
+      ...(COMPANION_ONLY ? { AMADEUS_COMPANION: '1' } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -550,7 +648,9 @@ function guardTrustedRendererShell(window: BrowserWindow): void {
 }
 
 function createWindow(): void {
-  const isWallpaperOnly = wantsWallpaper()
+  // Companion-only keeps this window as a hidden bridge client only: the Tk
+  // card is the visible surface, and no wallpaper Slice/Canvas is created.
+  const hiddenStartup = STARTUP_MODE !== 'window'
   const values = desktopSettings.snapshot(process.env).values as Record<string, string>
   const theme = values.AMADEUS_UI_THEME === 'classic' ? 'classic' : 'wallpaper-slice'
   mainWindow = new BrowserWindow({
@@ -564,7 +664,7 @@ function createWindow(): void {
     titleBarStyle: process.platform === 'win32' ? 'hidden' : 'default',
     titleBarOverlay: process.platform === 'win32' ? TITLE_BAR_THEMES[theme] : undefined,
     backgroundColor: TITLE_BAR_THEMES[theme].color,
-    show: !isWallpaperOnly,
+    show: !hiddenStartup,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.mjs'),
@@ -584,7 +684,7 @@ function createWindow(): void {
   })
 
   // load from vite dev server or built files
-  const rendererQuery = { mainWindow: '1', ...(wantsWallpaper() ? { wallpaper: '1' } : {}) }
+  const rendererQuery = { mainWindow: '1', ...(STARTUP_MODE === 'wallpaper' ? { wallpaper: '1' } : {}) }
   const query = new URLSearchParams(rendererQuery)
   const queryParam = `?${query.toString()}`
   if (isDev) {
@@ -603,7 +703,7 @@ function createWindow(): void {
 
   mainWindow.on('close', (event) => {
     const liveWindowsWallpaper = process.platform === 'win32' && Boolean(windowsWallpaper?.active || electronSliceWindow)
-    if (applicationLifecycle.shouldHideWallpaperWindow(wantsWallpaper() || liveWindowsWallpaper)) {
+    if (applicationLifecycle.shouldHideWallpaperWindow(STARTUP_MODE === 'wallpaper' || liveWindowsWallpaper)) {
       event.preventDefault()
       mainWindow?.hide()
     }
@@ -713,6 +813,7 @@ function closeElectronCanvasWindow(): void {
 }
 
 function createElectronCanvasWindow(bridge: WallpaperBridgeDescriptor, bridgeKey: string): void {
+  if (COMPANION_ONLY) return
   const platformPolicy = wallpaperWindowPolicy(process.platform)
   if (platformPolicy.hostMode !== 'scene') {
     closeElectronCanvasWindow()
@@ -884,6 +985,9 @@ function closeElectronSliceWindow(): void {
 }
 
 function createElectronSliceWindow(rawBridge: unknown): boolean {
+  // Companion-only never creates the wallpaper character surface; the Tk card
+  // is the presentation surface for this launch.
+  if (COMPANION_ONLY) return false
   const bridge = normalizeWallpaperBridge(rawBridge)
   if (!bridge) return false
   const platformPolicy = wallpaperWindowPolicy(process.platform)
@@ -2322,6 +2426,8 @@ ipcMain.handle('work-preview.set-bounds', (event, rawPreviewId: unknown, rawBoun
 })
 ipcMain.handle('electron-slice.open', async (event, bridge: unknown) => {
   if (!isMainRenderer(event.sender)) return false
+  // Companion-only has no wallpaper host to start and no Slice surface to show.
+  if (COMPANION_ONLY) return false
   if (process.platform === 'win32') ensureWindowsWallpaperTray()
   if (windowsWallpaper) {
     const descriptor = normalizeWallpaperBridge(bridge)
@@ -2625,6 +2731,12 @@ app.on('second-instance', (_event, commandLine) => {
     createWorkOverlayWindow()
     return
   }
+  if (COMPANION_ONLY) {
+    // A repeated companion launch must never create a second card: bring the
+    // card this launch already owns back to the front.
+    void showCompanionCard()
+    return
+  }
   const request = applicationLifecycle.requestMainWindow(Boolean(mainWindow && !mainWindow.isDestroyed()))
   if (request === 'defer') return
   if (request === 'create') {
@@ -2648,10 +2760,9 @@ function ensureWindowsWallpaperTray(): void {
 }
 
 app.whenReady().then(async () => {
-  // This change owns Windows startup only; retain the existing non-Windows
-  // second-instance lifecycle until that path is qualified independently.
   if (process.platform === 'win32' && !gotSingleInstanceLock) return
-  if (process.platform === 'win32' && wantsWallpaper()) {
+  ensureCompanionTrayIfNeeded()
+  if (STARTUP_MODE === 'wallpaper') {
     ensureWindowsWallpaperTray()
   }
   let backendStartFailed = false
@@ -2662,8 +2773,20 @@ app.whenReady().then(async () => {
     console.error('[electron] backend failed to become ready', error)
   }
   createWindow()
-  if (process.platform === 'win32' && (backendStartFailed || windowsWallpaperTray?.hasIcon === false)) mainWindow?.show()
-  if (applicationLifecycle.completeStartup()) {
+  if (backendStartFailed) {
+    // A companion launch with no backend has no surface at all: surface the
+    // failure where the user can see it instead of hiding silently.
+    mainWindow?.show()
+  } else if (COMPANION_ONLY) {
+    // The backend owns the card process; the tray is how a companion-only
+    // launch reaches it and how the session ends.
+    const status = await companionRequest('/companion/card/status')
+    const card = (status?.card ?? {}) as Record<string, unknown>
+    companionTray?.setVisible(card.running === true)
+  } else if (process.platform === 'win32' && windowsWallpaperTray?.hasIcon === false) {
+    mainWindow?.show()
+  }
+  if (!COMPANION_ONLY && applicationLifecycle.completeStartup()) {
     mainWindow?.show()
     mainWindow?.focus()
   }
@@ -2673,6 +2796,10 @@ app.whenReady().then(async () => {
   screen.on('display-removed', updateElectronSliceBounds)
 
   app.on('activate', () => {
+    if (COMPANION_ONLY) {
+      void showCompanionCard()
+      return
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show()
       if (mainWindow.isMinimized()) mainWindow.restore()
@@ -2690,6 +2817,8 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
+  companionTray?.destroy()
+  companionTray = null
   closeElectronSliceWindow()
   closeWorkOverlayWindow()
   closeAllWorkPreviewSurfaces()

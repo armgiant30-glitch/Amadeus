@@ -202,6 +202,9 @@ host_readonly_voice_sink = None
 # resolved WorkItem status questions. Populated by bootstrap; lookup itself
 # continues to own only identity and ledger facts.
 work_status_narrator = None
+# Companion-only owns exactly one portrait card process for this backend
+# lifetime. None means the ordinary desktop/wallpaper startup path.
+companion_card = None
 # Focus is applied synchronously at the dispatcher boundary, while its spoken
 # post-condition waits for the shared character lane in a tracked background
 # task.  This keeps a compound "switch and edit" from delaying Provider start.
@@ -298,14 +301,17 @@ def _http_request_authenticated(headers, auth_policy: LocalAuthPolicy) -> bool:
 
 # bootstrap.
 
-async def bootstrap(port: int = 17777) -> None:
+async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
     """Mirrors main.py's main() init sequence, minus GUI."""
     global vts_manager, player, playback_manager, tts_runtime, asr_manager, wake_service
     global tts_executor, translation_executor, pending_actions, pending_sentence_items
     global exp_tts_semaphore, exp_play_condition, output_idle_probe, host_readonly_voice_sink
-    global work_status_narrator
+    global work_status_narrator, companion_card
 
     auth_policy = LocalAuthPolicy.from_environment(os.environ)
+    from server.companion_runtime import desktop_credential_environment
+
+    companion_credentials = desktop_credential_environment(os.environ) if companion_only else {}
     clear_inherited_auth_environment(os.environ)
     if auth_policy.required:
         logger.info("local desktop authentication enabled")
@@ -313,6 +319,8 @@ async def bootstrap(port: int = 17777) -> None:
         logger.warning(
             "local desktop authentication disabled; direct loopback development mode"
         )
+    if companion_only:
+        logger.info("companion-only mode: portrait card, local voice, no Work or AUIP context")
 
     e2e_no_tts = str(os.environ.get("AMADEUS_E2E_NO_TTS") or "").strip().lower() in {
         "1",
@@ -338,7 +346,10 @@ async def bootstrap(port: int = 17777) -> None:
     )
     import llm.client as _llm_client_mod
 
-    cooperative_chat_enabled = bool(settings.COOPERATIVE_CHAT_ENABLED)
+    # Companion-only keeps the shared session, context and local voice stack but
+    # owns no Work surface: the cooperative/Work planner lanes are the only
+    # producers of WorkItems, so they stay off even if .env enables them.
+    cooperative_chat_enabled = bool(settings.COOPERATIVE_CHAT_ENABLED) and not companion_only
 
     # wire handler registration.
     from server.ws_handler import manager as _mgr
@@ -785,6 +796,53 @@ async def bootstrap(port: int = 17777) -> None:
     @app.get("/wallpaper/lively/{rel_path:path}")
     async def lively_asset(rel_path: str):
         return _project_file_response(Path(ROOT) / "wallpaper" / "lively", rel_path)
+
+    def _companion_card_required():
+        if companion_card is None:
+            raise HTTPException(status_code=404, detail="Companion card is not part of this launch")
+        return companion_card
+
+    def _companion_request_allowed(request: Request) -> None:
+        if not _http_request_authenticated(request.headers, auth_policy):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _http_request_origin_allowed(request.headers, backend_port=port):
+            raise HTTPException(status_code=403, detail="Untrusted request origin")
+
+    @app.get("/companion/card/status")
+    async def companion_card_status(request: Request):
+        _companion_request_allowed(request)
+        card = _companion_card_required()
+        return {"ok": True, "card": card.status()}
+
+    @app.post("/companion/card/visibility")
+    async def companion_card_visibility(payload: dict, request: Request):
+        _companion_request_allowed(request)
+        card = _companion_card_required()
+        if not isinstance(payload, dict) or not isinstance(payload.get("visible"), bool):
+            raise HTTPException(status_code=400, detail="visible must be a boolean")
+        return {"ok": True, "card": await card.set_visible(payload["visible"])}
+
+    @app.post("/companion/card/focus")
+    async def companion_card_focus(request: Request):
+        """Show and raise the card; a second launch must never create another."""
+        _companion_request_allowed(request)
+        card = _companion_card_required()
+        return {"ok": True, "card": await card.focus()}
+
+    @app.post("/companion/card-close")
+    async def companion_card_close(request: Request):
+        """The user closed the card. Its owning launch ends with it."""
+        _companion_request_allowed(request)
+        card = _companion_card_required()
+        await card.stop()
+        logger.info("companion card closed by the user; ending the backend session")
+
+        async def _request_exit() -> None:
+            await asyncio.sleep(0.2)
+            server.should_exit = True
+
+        asyncio.create_task(_request_exit())
+        return {"ok": True}
 
     # start uvicorn in background.
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
@@ -2619,7 +2677,7 @@ async def bootstrap(port: int = 17777) -> None:
         release_work=work_activity.release_work_presentation,
     )
     work_status_narrator = work_observer
-    if bool(settings.AUIP_NARRATION_ENABLED):
+    if bool(settings.AUIP_NARRATION_ENABLED) and not companion_only:
         from server.auip_narration import AuipNarrationAdapter, AuipNarrationProfile
         from server.auip_narration_llm import (
             decide_with_auip_observer,
@@ -2681,6 +2739,19 @@ async def bootstrap(port: int = 17777) -> None:
         backend_url=f"ws://127.0.0.1:{port}/ws",
         auth_policy=auth_policy,
     )
+    if companion_only:
+        # The card is the only visible surface: no wallpaper, no Slice, no
+        # Canvas, no visible main UI. It reuses this session and voice stack.
+        from server.companion_runtime import CompanionCardHost
+
+        companion_card = CompanionCardHost(
+            Path(ROOT),
+            backend_url=f"ws://127.0.0.1:{port}/ws",
+            auth_policy=auth_policy,
+            credential_environment=companion_credentials,
+        )
+        status = await companion_card.ensure_running()
+        logger.info("[companion] card %s url=%s", status.get("status"), status.get("url"))
 
     # Start only after dependency configuration, inside the owning teardown scope.
     # Cancelling executor Futures cannot stop their threads: signal and join them.
@@ -2698,6 +2769,13 @@ async def bootstrap(port: int = 17777) -> None:
 
         async def _close_runtime() -> None:
             vts_worker_stop.set()
+            if companion_card is not None:
+                # The card and the audio it speaks through are owned by this
+                # launch; leave neither behind.
+                try:
+                    await companion_card.stop()
+                except Exception:
+                    logger.exception("Companion card shutdown failed")
             try:
                 await chat_h.close()
             except Exception:
@@ -6291,5 +6369,10 @@ def _noop_warmup() -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Amadeus backend server")
     parser.add_argument("--port", type=int, default=17777)
+    parser.add_argument(
+        "--companion",
+        action="store_true",
+        help="Companion-only session: portrait card and local voice, no wallpaper/Work/AUIP surfaces",
+    )
     args = parser.parse_args()
-    asyncio.run(bootstrap(port=args.port))
+    asyncio.run(bootstrap(port=args.port, companion_only=args.companion))

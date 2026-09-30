@@ -159,6 +159,17 @@ def update_playback_subtitle(sentence_id, japanese_text, chinese_text, *, update
     if "_subtitle" not in _SENTENCE_META.get(str(sentence_id or ""), {}):
         update(japanese_text, chinese_text)
 
+
+def _companion_overlay_url() -> str:
+    """Companion-only card endpoint, or empty when this launch owns no card.
+
+    Read through the module attribute every time so a stale import binding can
+    never keep publishing captions at a card that already exited.
+    """
+    from server import companion_runtime
+
+    return companion_runtime.default_overlay_url()
+
 _STRONG_ENDINGS = {"\u3002", "\uff01", "\uff1f", "!", "?", "\n"}
 _WEAK_ENDINGS = {"\u3001", "\uff0c", ",", "\uff1b", ";", "\uff1a", ":"}
 _KANA_RE = re.compile("[\u3040-\u30ff]")
@@ -211,7 +222,7 @@ def submit_vn_tts(
     metadata = {
         "source": str(payload.get("source") or "").strip(),
         "display_language": _normalize_display_language(payload.get("display_language")),
-        "overlay_url": str(payload.get("overlay_url") or "").strip(),
+        "overlay_url": str(payload.get("overlay_url") or "").strip() or _companion_overlay_url(),
         "emotion": str(payload.get("emotion") or payload.get("emotion_intent") or "").strip(),
         "duration_ms": int(payload.get("duration_ms") or 6500),
         "line_id": str(payload.get("line_id") or "").strip(),
