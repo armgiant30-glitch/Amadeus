@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,8 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from .models import MemoryRecord, MemoryStatus, normalize_iso, normalize_text, utc_now_iso
 
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory (
@@ -50,6 +53,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 """
 
 _FTS_QUERY_SPLIT = re.compile(r"[^\w\u3400-\u9fff]+", re.UNICODE)
+_CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
+
+
+def _fts_terms(query: str) -> list[str]:
+    return [
+        token
+        for token in _FTS_QUERY_SPLIT.split(query)
+        if token and token.isascii() and len(token) >= 3
+    ]
+
+
+def _like_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for token in _FTS_QUERY_SPLIT.split(query):
+        if not token:
+            continue
+        if token.isascii():
+            if len(token) >= 2:
+                terms.append(token)
+            continue
+        for run in _CJK_RUN.findall(token):
+            if len(run) <= 2:
+                terms.append(run)
+                continue
+            terms.extend(run[index : index + 2] for index in range(len(run) - 1))
+    return list(dict.fromkeys(terms))[:24]
 
 
 class MemoryStore:
@@ -240,52 +269,80 @@ class MemoryStore:
         clean_query = normalize_text(query)
         clean_limit = max(1, min(int(limit), 50))
         effective_time = normalize_iso(as_of or utc_now_iso())
-        where = [
+        common_where = [
             "m.valid_from <= ?",
             "(m.valid_to IS NULL OR m.valid_to > ?)",
         ]
-        params: list[object] = [effective_time, effective_time]
+        common_params: list[object] = [effective_time, effective_time]
         if scopes:
             placeholders = ",".join("?" for _ in scopes)
-            where.append(f"m.scope IN ({placeholders})")
-            params.extend(scopes)
+            common_where.append(f"m.scope IN ({placeholders})")
+            common_params.extend(scopes)
         if namespaces:
             placeholders = ",".join("?" for _ in namespaces)
-            where.append(f"m.namespace IN ({placeholders})")
-            params.extend(namespaces)
-        search_tokens = [token for token in _FTS_QUERY_SPLIT.split(clean_query) if token]
-        fts_tokens = [token for token in search_tokens if len(token) >= 3]
-        use_fts = bool(fts_tokens) and len(fts_tokens) == len(search_tokens)
-        if use_fts:
-            where.insert(0, "memory_fts MATCH ?")
-            params.insert(0, " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in fts_tokens))
-            from_sql = "memory_fts f JOIN memory m ON m.id = f.id"
-            order_sql = "bm25(f) ASC, m.importance DESC, m.updated_at DESC"
-        else:
-            from_sql = "memory m"
-            order_sql = "m.importance DESC, m.updated_at DESC"
-            like_tokens = search_tokens or ([clean_query] if clean_query else [])
-            if like_tokens:
-                clauses: list[str] = []
-                for token in like_tokens:
-                    clauses.append("(m.text LIKE ? OR m.tags LIKE ?)")
-                    pattern = f"%{token}%"
-                    params.extend((pattern, pattern))
-                where.append("(" + " OR ".join(clauses) + ")")
-        params.append(clean_limit)
-        sql = f"SELECT m.* FROM {from_sql} WHERE {' AND '.join(where)} ORDER BY {order_sql} LIMIT ?"
-        try:
-            with self._connect() as connection:
-                rows = connection.execute(sql, params).fetchall()
-        except sqlite3.OperationalError:
-            rows = self._fallback_like(
-                clean_query,
-                scopes=scopes,
-                namespaces=namespaces,
-                limit=clean_limit,
-                as_of=effective_time,
+            common_where.append(f"m.namespace IN ({placeholders})")
+            common_params.extend(namespaces)
+
+        rows: list[sqlite3.Row] = []
+        fts_terms = _fts_terms(clean_query)
+        if fts_terms:
+            fts_query = " OR ".join(
+                f'"{term.replace(chr(34), chr(34) * 2)}"' for term in fts_terms
             )
-        return [self._record_from_row(row) for row in rows]
+            sql = (
+                "SELECT m.*, bm25(memory_fts) AS score "
+                "FROM memory_fts f JOIN memory m ON m.id = f.id "
+                f"WHERE memory_fts MATCH ? AND {' AND '.join(common_where)} "
+                "ORDER BY score ASC, m.importance DESC, m.updated_at DESC LIMIT ?"
+            )
+            try:
+                with self._connect() as connection:
+                    rows.extend(
+                        connection.execute(
+                            sql, [fts_query, *common_params, clean_limit * 3]
+                        ).fetchall()
+                    )
+            except sqlite3.OperationalError:
+                logger.debug("FTS memory recall unavailable; using LIKE fallback", exc_info=True)
+
+        like_terms = _like_terms(clean_query)
+        if like_terms:
+            clauses: list[str] = []
+            like_params: list[object] = [*common_params]
+            for term in like_terms:
+                clauses.append("(m.text LIKE ? OR m.tags LIKE ? OR m.namespace LIKE ?)")
+                pattern = f"%{term}%"
+                like_params.extend((pattern, pattern, pattern))
+            sql = (
+                "SELECT m.* FROM memory m "
+                f"WHERE {' AND '.join(common_where)} AND ({' OR '.join(clauses)}) "
+                "ORDER BY m.importance DESC, m.updated_at DESC LIMIT ?"
+            )
+            with self._connect() as connection:
+                rows.extend(
+                    connection.execute(sql, [*like_params, clean_limit * 3]).fetchall()
+                )
+
+        if not clean_query:
+            sql = (
+                "SELECT m.* FROM memory m "
+                f"WHERE {' AND '.join(common_where)} "
+                "ORDER BY m.importance DESC, m.updated_at DESC LIMIT ?"
+            )
+            with self._connect() as connection:
+                rows.extend(connection.execute(sql, [*common_params, clean_limit]).fetchall())
+
+        deduped: list[MemoryRecord] = []
+        seen: set[str] = set()
+        for row in rows:
+            record = self._record_from_row(row)
+            if record.id in seen:
+                continue
+            seen.add(record.id)
+            deduped.append(record)
+            if len(deduped) >= clean_limit:
+                break
+        return deduped
 
     def _fallback_like(
         self,

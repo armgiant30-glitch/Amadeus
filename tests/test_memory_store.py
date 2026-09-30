@@ -127,3 +127,26 @@ def test_revoke_hides_memory(tmp_path: Path) -> None:
 
     assert revoked.status == "revoked"
     assert store.recall("红莉栖", namespaces=["reading:general"]) == []
+
+def test_multi_token_fts_recall_returns_partial_match(tmp_path: Path) -> None:
+    store = MemoryStore.open(tmp_path)
+    store.remember([
+        make_record("spoiler preference for the reader", memory_id="en1", tags=("spoiler",))
+    ])
+
+    hits = store.recall("spoiler cursor", scopes=["user"], namespaces=["reading:general"])
+
+    assert [hit.id for hit in hits] == ["en1"]
+
+
+def test_chinese_sentence_recall_uses_shared_bigram(tmp_path: Path) -> None:
+    store = MemoryStore.open(tmp_path)
+    store.remember([make_record("用户不喜欢主动剧透。", memory_id="cjk1")])
+
+    hits = store.recall(
+        "接下来会不会剧透？",
+        scopes=["user"],
+        namespaces=["reading:general"],
+    )
+
+    assert [hit.id for hit in hits] == ["cjk1"]
