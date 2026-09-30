@@ -37,6 +37,8 @@ DEFAULT_CARD_HOST = "127.0.0.1"
 DEFAULT_CARD_PORT = 8788
 CARD_READY_TIMEOUT_S = 15.0
 CARD_HEALTH_TIMEOUT_S = 0.35
+CARD_LOG_RELATIVE_PATH = Path("runtime") / "companion" / "card.log"
+CARD_LOG_TAIL_BYTES = 4096
 
 # The card is the companion's speech surface. The shared TTS bridge reads this
 # when a speech payload carries no session-specific overlay URL.
@@ -142,6 +144,7 @@ class CompanionCardHost:
         self._adopted = False
         self._visible = True
         self._python = str(python or "")
+        self._log_file: Any = None
 
     @property
     def url(self) -> str:
@@ -180,29 +183,45 @@ class CompanionCardHost:
             shutil.which("python") or "",
         ]
         seen: set[str] = set()
+        rejected: list[str] = []
         for raw in candidates:
             if not raw:
                 continue
             path = str(Path(raw).resolve())
             key = os.path.normcase(path)
-            if key in seen or not Path(path).is_file():
+            if key in seen:
                 continue
             seen.add(key)
+            if not Path(path).is_file():
+                rejected.append(f"{path} (not a file)")
+                continue
             try:
                 probe = subprocess.run(
                     [path, "-c", "import tkinter, PIL"],
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     timeout=5,
                     check=False,
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
+                rejected.append(f"{path} (probe timed out)")
+                continue
+            except OSError as error:
+                rejected.append(f"{path} ({error})")
                 continue
             if probe.returncode == 0:
+                logger.info("[companion] card interpreter: %s", path)
                 self._python = path
                 return path
-        logger.warning("[companion] no Python with tkinter+Pillow found; trying %s", sys.executable)
+            reason = (probe.stderr or probe.stdout or b"").decode("utf-8", "replace").strip()
+            last_line = reason.splitlines()[-1] if reason else f"exit {probe.returncode}"
+            rejected.append(f"{path} ({last_line})")
+        logger.warning(
+            "[companion] no Python with tkinter+Pillow found; the card will fail to start. "
+            "Set VN_OVERLAY_PYTHON to an interpreter that has both. Rejected: %s",
+            "; ".join(rejected) or "no candidates",
+        )
         self._python = str(Path(sys.executable).resolve())
         return self._python
 
@@ -229,11 +248,21 @@ class CompanionCardHost:
         return child_env
 
     def _spawn(self, args: list[str]) -> subprocess.Popen[Any]:
+        log_path = self.card_log_path()
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+        except OSError as error:
+            # A card that cannot be diagnosed is worse than a card without a
+            # log, but it must never block startup; say so and keep going.
+            logger.warning("[companion] card log unavailable (%s): %s", log_path, error)
+            log_file = None
+        self._log_file = log_file
         kwargs: dict[str, Any] = {
             "cwd": str(self.project_root),
             "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stdout": log_file or subprocess.DEVNULL,
+            "stderr": log_file or subprocess.DEVNULL,
             "shell": False,
             "env": self._child_environment(),
         }
@@ -244,6 +273,25 @@ class CompanionCardHost:
             kwargs["startupinfo"] = startup
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         return subprocess.Popen(args, **kwargs)
+
+    def card_log_path(self) -> Path:
+        return self.project_root / CARD_LOG_RELATIVE_PATH
+
+    def card_log_tail(self) -> str:
+        """Last lines of the card's own stdout/stderr, for a failed start."""
+        path = self.card_log_path()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return ""
+        try:
+            with path.open("rb") as handle:
+                if size > CARD_LOG_TAIL_BYTES:
+                    handle.seek(size - CARD_LOG_TAIL_BYTES)
+                raw = handle.read(CARD_LOG_TAIL_BYTES)
+        except OSError:
+            return ""
+        return raw.decode("utf-8", "replace").strip()
 
     async def ensure_running(self) -> dict[str, Any]:
         helper = self._helper_path()
@@ -275,18 +323,46 @@ class CompanionCardHost:
         deadline = time.monotonic() + CARD_READY_TIMEOUT_S
         while time.monotonic() < deadline:
             if not self._process_alive():
-                raise RuntimeError("Companion card exited before becoming ready.")
+                exit_code = self._proc.poll() if self._proc else None
+                message = self._failure_message(
+                    f"Companion card exited before becoming ready (code {exit_code})"
+                )
+                self._close_log()
+                raise RuntimeError(message)
             if await asyncio.to_thread(card_health_ok, self.health_url):
                 self._visible = True
                 self._publish_surface_url()
                 logger.info(
-                    "[companion] card ready pid=%s url=%s",
+                    "[companion] card ready pid=%s url=%s log=%s",
                     self._proc.pid if self._proc else None,
                     self.url,
+                    self.card_log_path(),
                 )
                 return self.status()
             await asyncio.sleep(0.12)
-        raise RuntimeError(f"Companion card did not become ready: {self.health_url}")
+        message = self._failure_message(
+            f"Companion card did not become ready: {self.health_url}"
+        )
+        self._close_log()
+        raise RuntimeError(message)
+
+    def _failure_message(self, headline: str) -> str:
+        tail = self.card_log_tail()
+        log_path = self.card_log_path()
+        logger.error("[companion] %s (interpreter=%s, log=%s)", headline, self._python, log_path)
+        if tail:
+            logger.error("[companion] card output:\n%s", tail)
+            return f"{headline}\ninterpreter: {self._python}\nlog: {log_path}\n{tail}"
+        return f"{headline}\ninterpreter: {self._python}\nlog: {log_path} (empty)"
+
+    def _close_log(self) -> None:
+        log_file = self._log_file
+        self._log_file = None
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
 
     def _publish_surface_url(self) -> None:
         set_default_overlay_url(self.url)
@@ -314,6 +390,7 @@ class CompanionCardHost:
         proc = self._proc
         self._proc = None
         if proc is None or proc.poll() is not None:
+            self._close_log()
             return
         logger.info("[companion] terminating card pid=%s", proc.pid)
         try:
@@ -324,3 +401,4 @@ class CompanionCardHost:
                 proc.kill()
             except Exception:
                 logger.exception("[companion] failed to kill card pid=%s", proc.pid)
+        self._close_log()
