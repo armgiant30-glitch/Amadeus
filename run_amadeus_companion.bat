@@ -42,7 +42,7 @@ echo [Companion] Companion card is the visible surface.
 echo [Companion] Close the card (right-click) to end the session.
 echo.
 
-"electron\node_modules\electron\dist\electron.exe" . --companion
+"electron\node_modules\electron\dist\electron.exe" "%~dp0electron" --companion
 set EXITCODE=%ERRORLEVEL%
 echo.
 echo [Companion] exited with code %EXITCODE%  (0x80000003 means a sandboxed terminal)
