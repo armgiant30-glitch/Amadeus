@@ -72,3 +72,15 @@ def test_companion_context_can_exclude_activity_memory(tmp_path: Path) -> None:
 
     assert "用户不喜欢剧透" in block
     assert "未来剧情状态" not in block
+def test_chat_runtime_has_optional_extra_context_for_companion() -> None:
+    import inspect
+    from core.chat_runtime import ChatRuntime, _TurnState, _turn_role_grounding
+
+    signature = inspect.signature(ChatRuntime.stream_llm_query)
+    assert "extra_context" in signature.parameters
+
+    state = _TurnState(
+        gui_callback=None,
+        extra_context="<memory_data>用户不喜欢剧透</memory_data>",
+    )
+    assert "用户不喜欢剧透" in _turn_role_grounding(state)
