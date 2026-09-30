@@ -154,7 +154,8 @@ def main():
     parser.add_argument("--static-idle", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8788)
-    parser.add_argument("--backend-url", default="", help="Local backend /ws endpoint for VN session controls")
+    parser.add_argument("--backend-url", default="", help="Local backend /ws endpoint for session controls")
+    parser.add_argument("--companion-controls", action="store_true", help="Use Companion ASR/vision controls")
     parser.add_argument("--x", type=int, default=60)
     parser.add_argument("--y", type=int, default=80)
     parser.add_argument("--on-close", choices=("exit", "card-close"), default="exit",

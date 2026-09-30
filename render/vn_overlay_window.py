@@ -176,7 +176,7 @@ class PortraitOverlayTk:
         self._thread.start()
         if backend_url:
             from render.vn_overlay_controls import VNOverlayControls
-            self._controls = VNOverlayControls(backend_url)
+            self._controls = VNOverlayControls(backend_url, companion=companion_controls)
         self._poll_timer = self.root.after(40, self._poll)
         self._scan_timer = self.root.after(50, self._scan_tick)
         self.root.protocol("WM_DELETE_WINDOW", self.close)

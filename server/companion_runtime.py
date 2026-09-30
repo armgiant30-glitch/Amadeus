@@ -315,6 +315,7 @@ class CompanionCardHost:
             "--x", str(self.x),
             "--y", str(self.y),
             "--on-close", "card-close",
+            "--companion-controls",
         ]
         if self.backend_url:
             args.extend(["--backend-url", self.backend_url])

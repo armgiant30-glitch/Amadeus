@@ -395,6 +395,7 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
     from server.auip_runtime import runtime as auip_runtime
     from server.auip_self_attach import AuipSelfAttachCoordinator
     from server.handlers.vn_player_handler import VNPlayerHandler
+    from server.handlers.companion_control_handler import CompanionControlHandler
     from server.handlers.vn_launch_handler import VNLaunchHandler
     from server.work_observer import WorkObserverCoordinator
     from server.canvas_action_router import CanvasActionRouter
@@ -600,12 +601,13 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
         _validate_provider_start_admission
     )
     vn_h = VNPlayerHandler()
+    companion_control_h = CompanionControlHandler()
     vn_launch_h = VNLaunchHandler()
 
     handlers = (chat_h, session_h, tts_h, asr_h, wake_h, vts_h, expr_h, sys_h,
         render_h, wallpaper_h, provider_h, capability_h, mcp_connection_h,
         provider_activity_h, work_h, work_preview_h, attention_h, auip_h, vn_h,
-        vn_launch_h)
+        companion_control_h, vn_launch_h)
     if chat_role_delivery is not None:
         handlers += (chat_role_delivery,)
     for h in handlers:
@@ -1500,8 +1502,8 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
             logger.exception("failed to prepare wake chat session")
             return ""
 
-    async def _send_wake_text(text: str, *, source: str = "wake") -> None:
-        if not WAKE_AUTO_SEND_TO_CHAT:
+    async def _send_wake_text(text: str, *, source: str = "wake", visual=None, force_auto_send: bool = False) -> None:
+        if not WAKE_AUTO_SEND_TO_CHAT and not force_auto_send:
             return
         text = str(text or "").strip()
         if not text:
@@ -1548,12 +1550,21 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
             provider=provider,
             session_id=session_id,
             source="wake",
+            visual=visual,
         )
 
     async def _handle_asr_recognized(payload: dict) -> None:
         source = str(payload.get("source") or "")
         if source == "vn_player":
             await _handle_vn_player_asr_recognized(payload)
+            return
+        if source == "companion":
+            await _send_wake_text(
+                str(payload.get("text") or ""),
+                source="companion ASR",
+                visual=True if companion_control_h.vision_enabled else None,
+                force_auto_send=True,
+            )
             return
         # wake and manual microphone (empty source) both auto-submit,
         # so clicking the mic gives real-time voice interaction.
@@ -2617,6 +2628,10 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
         on_listening_stopped=_handle_asr_listening_stopped,
         on_ready_to_listen=_handle_asr_ready_to_listen,
         tts_playing_fn=_tts_should_block_mic,
+    )
+    companion_control_h.configure(
+        asr_control=asr_h.handle,
+        asr_state=lambda: asr_h.listening_state(include_context=True),
     )
     wake_h.configure(wake_service_factory=_get_or_create_wake_service)
     vts_h.configure(vts_manager=vts_manager)

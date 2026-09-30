@@ -18,11 +18,14 @@ from server.local_auth import AUTH_TOKEN_HEADER, LocalAuthPolicy
 class VNOverlayControls:
     """One connection, one outstanding change; reconnect never replays a click."""
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, *, companion: bool = False):
         target = urlsplit(url)
         if target.scheme != "ws" or target.hostname not in {"127.0.0.1", "localhost"} or target.path != "/ws":
             raise ValueError("VN controls require the local backend /ws endpoint")
         self.url = url
+        self._companion = bool(companion)
+        self._status_method = "companion.status" if companion else "vn.status"
+        self._input_method = "companion.input.set" if companion else "vn.input.set"
         auth = LocalAuthPolicy.from_environment(os.environ)
         self._headers = {AUTH_TOKEN_HEADER: auth.token} if auth.required else {}
         self._lock = threading.Lock()
@@ -39,12 +42,17 @@ class VNOverlayControls:
 
     def set_inputs(self, session_id: str, **changes) -> bool:
         with self._lock:
-            if (not self._state["connected"] or self._state["pending"] or not session_id
-                    or session_id != self._state["inputs"].get("session_id")):
+            if not self._state["connected"] or self._state["pending"]:
                 return False
+            if self._companion:
+                params = {**changes, "session_id": "companion"}
+            else:
+                if not session_id or session_id != self._state["inputs"].get("session_id"):
+                    return False
+                params = {**changes, "session_id": session_id}
             self._state.update(pending=True, error="")
-            self._commands.put_nowait({"type": "req", "id": uuid.uuid4().hex, "method": "vn.input.set",
-                                      "params": {**changes, "session_id": session_id}})
+            self._commands.put_nowait({"type": "req", "id": uuid.uuid4().hex,
+                                      "method": self._input_method, "params": params})
             return True
 
     def close(self):
@@ -58,7 +66,7 @@ class VNOverlayControls:
             try:
                 with connect(self.url, additional_headers=self._headers, open_timeout=3, close_timeout=1) as ws:
                     self._socket = ws
-                    status_request = json.dumps({"type": "req", "id": "status", "method": "vn.status", "params": {}})
+                    status_request = json.dumps({"type": "req", "id": "status", "method": self._status_method, "params": {}})
                     ws.send(status_request)
                     pending_id, deadline = "", time.monotonic() + 30
                     while not self._stop.is_set():
@@ -77,7 +85,7 @@ class VNOverlayControls:
                             continue
                         params = message.get("params") or {}
                         with self._lock:
-                            is_status = (message.get("type") == "evt" and message.get("method") == "vn.status"
+                            is_status = (message.get("type") == "evt" and message.get("method") == self._status_method
                                          or message.get("type") == "res" and message.get("id") == "status")
                             if is_status and isinstance(params.get("inputs"), dict):
                                 previous_session = self._state["inputs"].get("session_id")
