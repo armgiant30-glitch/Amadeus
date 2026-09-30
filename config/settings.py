@@ -283,8 +283,10 @@ VTS_RECONNECT_ENABLED = _bool("VTS_RECONNECT_ENABLED", True)
 # TTS（Amadeus 低延迟 GPT-SoVITS v3 推理；本地后端仅支持 v3 权重）
 # ===========================================================================
 TTS_BACKEND = _str("TTS_BACKEND", "gpt_sovits").strip().lower()
-TTS_API_BASE_URL = _str("TTS_API_BASE_URL", "https://api.openai.com/v1")
-TTS_API_KEY = _secret("TTS_API_KEY", "")
+TTS_API_BASE_URL = _str("TTS_API_BASE_URL", "").strip() or OPENAI_BASE_URL
+TTS_API_KEY = _secret("TTS_API_KEY", "").strip() or (
+    OPENAI_API_KEY if TTS_BACKEND == "openai_compatible" else ""
+)
 TTS_API_MODEL = _str("TTS_API_MODEL", "gpt-4o-mini-tts")
 TTS_API_VOICE = _str("TTS_API_VOICE", "alloy")
 TTS_API_STREAM_PROTOCOL = _str("TTS_API_STREAM_PROTOCOL", "buffered").strip().lower()

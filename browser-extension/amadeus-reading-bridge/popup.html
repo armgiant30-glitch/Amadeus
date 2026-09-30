@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 280px; margin: 0; padding: 14px; font: 13px "Microsoft YaHei UI", sans-serif; background: #071e24; color: #d6f4e9; }
+    h1 { margin: 0 0 10px; font-size: 15px; color: #91dfcc; }
+    p { margin: 8px 0; color: #9fc3bb; line-height: 1.5; }
+    button { width: 100%; padding: 9px 10px; border: 1px solid #397c73; border-radius: 8px; background: #0d3339; color: #d6f4e9; cursor: pointer; }
+    button:hover { background: #12444b; }
+    #status { min-height: 34px; margin-top: 10px; color: #b9d9d2; }
+    .ok { color: #91dfcc !important; }
+    .error { color: #ff9f9f !important; }
+  </style>
+</head>
+<body>
+  <h1>Amadeus Reading Bridge</h1>
+  <p>选中小说、网页或 PDF 文本后发送到 Companion。</p>
+  <button id="send">发送当前选中文本</button>
+  <div id="status">等待操作</div>
+  <p>快捷键：Ctrl+Shift+Y</p>
+  <script src="popup.js"></script>
+</body>
+</html>
