@@ -22,15 +22,35 @@ wallpaper preference, so an enabled wallpaper setting can never pull the
 wallpaper host into a companion launch. `--wallpaper` and
 `AMADEUS_WINDOWS_STARTUP_MODE` keep their existing meaning for every other mode.
 
+## Prerequisites for a fresh worktree
+
+A git worktree only checks out tracked files, so a new companion worktree needs
+two things that are deliberately not tracked:
+
+- **`.env`** — `config/settings.py` reads the project `.env`, and the backend
+  needs it for model and voice settings. It is gitignored, so copy it in (for
+  example from the main checkout) before the first launch. Without it the
+  backend fails on incomplete `AMADEUS_BACKEND_AUTH_MODE` /
+  `AMADEUS_BACKEND_TOKEN` / `AMADEUS_BACKEND_INSTANCE_NONCE` configuration.
+- **`assets/companion/`** — the optional `companion-kurisu` Lite pack that the
+  card renders (or at least `assets/companion/kurisu/manifest.json`). The card
+  still opens and shows captions without it, but the portrait stays on the
+  text/avatar fallback. The installed pack ships through
+  `python tools/external_assets.py install <bundle.zip>`; it is never in git.
+
 ## What companion mode skips
 
 - `windowsWallpaper.start()` — the wallpaper host is never created
   (`STARTUP_MODE === 'wallpaper'` gates the session and the tray).
 - `createElectronSliceWindow()` and `createElectronCanvasWindow()` — both return
   early, and the `electron-slice.open` IPC refuses before it can reach them.
+- `createWorkOverlayWindow()` — returns early, so an explicit `--work-overlay`
+  cannot add a Work panel to a companion launch.
 - The visible main window — it is still created as a hidden bridge client so the
-  Companion bridge descriptor and back-end session stay intact, but it is never
-  shown by startup.
+  Companion bridge descriptor and back-end session stay intact. On a successful
+  backend start it stays hidden; if the backend fails to start, the launch shows
+  it anyway, because a companion launch with no backend has no surface at all
+  and the failure must be visible instead of silently hidden.
 - Work, tools, Provider, permission and AUIP context — the backend runs with
   `--companion`, which turns off the cooperative/Work-planner lane and AUIP
   narration. Ordinary chat therefore creates no WorkItem. The session store,

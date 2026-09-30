@@ -1281,6 +1281,9 @@ function createWorkPanelWindow(): void {
 }
 
 function createWorkOverlayWindow(): void {
+  // Companion-only owns no Work surface: an explicit --work-overlay must not
+  // add a Work panel to a companion launch, matching the Slice/Canvas gate.
+  if (COMPANION_ONLY) return
   createWorkPanelWindow()
 }
 

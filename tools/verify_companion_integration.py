@@ -158,9 +158,10 @@ def main() -> int:
 
         # 4b. Multi-token full-text recall. A query whose tokens are all >= 3
         # characters takes the FTS path; one matching token must still return
-        # the record. `core/memory/store.py` orders that path by `bm25(f)`,
-        # which SQLite rejects for the aliased FTS table, so the store silently
-        # falls back to an AND-matching LIKE query and returns nothing.
+        # the record. This regressed once: `core/memory/store.py` ordered that
+        # path by `bm25(f)`, which SQLite rejects for the aliased FTS table, so
+        # the store silently fell back to an AND-matching LIKE query and
+        # returned nothing. Fixed in 33500e6.
         runtime.memory.remember([
             MemoryRecord.create(
                 text="spoiler preference for the reader", kind="preference",
@@ -169,9 +170,9 @@ def main() -> int:
         ])
         multi = runtime.memory.recall("spoiler cursor", scopes=("user",), namespaces=["general"])
         check(
-            "multi-token full-text recall reaches the matching record (owner: core/memory/store.py)",
+            "multi-token full-text recall reaches the matching record (core/memory/store.py)",
             any(record.text.startswith("spoiler preference") for record in multi),
-            f"ORDER BY bm25(f) is invalid; returned {len(multi)} record(s)",
+            f"returned {len(multi)} record(s)",
         )
 
         # 4c. Chinese retrieval. FTS5 tokenizes a Chinese run as one token, so a
