@@ -51,6 +51,30 @@ def test_selected_window_scope_never_expands_to_full_screen(monkeypatch: pytest.
         )
 
 
+def test_read_window_scope_captures_the_selected_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    window = {
+        "hwnd": "0x1234",
+        "title": "A chapter - Microsoft Edge",
+        "processName": "msedge.exe",
+        "rect": {"left": 10, "top": 20, "width": 1200, "height": 800},
+    }
+    monkeypatch.setattr(visual_runtime, "select_reader_window", lambda: window)
+    monkeypatch.setattr(
+        "server.window_capture.capture_window_frame",
+        lambda _hwnd: Image.new("RGB", (1200, 800)),
+    )
+    image, region, actual = visual_runtime._capture_read_window()
+    assert image.size == (1200, 800)
+    assert region["_actual_scope"] == "read_window"
+    assert actual == "read_window"
+
+
+def test_read_window_scope_fails_without_a_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(visual_runtime, "select_reader_window", lambda: None)
+    with pytest.raises(RuntimeError, match="reader window"):
+        visual_runtime._capture_read_window()
+
+
 def test_region_scope_never_expands_to_full_screen(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(visual_runtime._config, "region", "")
     with pytest.raises(RuntimeError, match="Vision region"):

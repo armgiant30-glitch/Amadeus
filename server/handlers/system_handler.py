@@ -1367,7 +1367,7 @@ class SystemHandler(RequestHandler):
             scope = str(values["vision_scope"] or "").strip().lower()
             if scope not in {
                 "full_screen", "current_window", "selected_window",
-                "wallpaper_surface", "region",
+                "wallpaper_surface", "region", "read_window",
             }:
                 raise ValueError(f"unsupported vision scope: {scope!r}")
             values["vision_scope"] = scope
