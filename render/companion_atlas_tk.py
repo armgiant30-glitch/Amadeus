@@ -34,6 +34,7 @@ class AtlasPlayer:
         self.spec = None
         self.mouth_spec = None
         self.mouth_entry = None
+        self.mouth_entry_url = ""
         self.mouth_value = 1.0
         self.started = clock()
         self.elapsed = 0.0
@@ -47,11 +48,14 @@ class AtlasPlayer:
             self.speech_counts[key] = self.speech_counts.get(key, 0) + 1
         self.last_speaking, self.last_emotion = speaking, key
         self.mouth_spec = self.mouth_config.get(key) if speaking else None
-        if self.mouth_spec and not self.mouth_entry:
+        if self.mouth_spec:
             mouth_url = str(self.mouth_spec.get("url") or "")
-            if mouth_url:
+            if mouth_url and mouth_url != self.mouth_entry_url:
+                if self.mouth_entry is not None:
+                    self.mouth_entry.close()
                 with Image.open(self.root / mouth_url) as image:
                     self.mouth_entry = image.convert("RGBA")
+                self.mouth_entry_url = mouth_url
         states = self.emotions[key]
         alternate = "speakingAlternate" in states and self.speech_counts.get(key, 1) % 2 == 0
         spec = (states["speakingAlternate"] if alternate else states["speaking"]) if speaking else (
@@ -146,6 +150,7 @@ class AtlasPlayer:
         if self.mouth_entry is not None:
             self.mouth_entry.close()
             self.mouth_entry = None
+        self.mouth_entry_url = ""
         self.entries.clear()
         self.resident_bytes = 0
         self.spec = None
