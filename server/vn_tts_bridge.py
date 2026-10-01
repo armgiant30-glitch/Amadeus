@@ -168,7 +168,12 @@ def _companion_overlay_url() -> str:
     """
     from server import companion_runtime
 
-    return companion_runtime.default_overlay_url()
+    url = companion_runtime.default_overlay_url()
+    if url:
+        return url
+    if os.environ.get("AMADEUS_COMPANION", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "http://127.0.0.1:8788/reaction"
+    return ""
 
 _STRONG_ENDINGS = {"\u3002", "\uff01", "\uff1f", "!", "?", "\n"}
 _WEAK_ENDINGS = {"\u3001", "\uff0c", ",", "\uff1b", ";", "\uff1a", ":"}
@@ -704,8 +709,8 @@ def schedule_overlay_playback(sentence_id: str, speaking: bool, loop: asyncio.Ab
 
 async def publish_overlay_playback(sentence_id: str, speaking: bool) -> None:
     """Project real audio boundaries to the companion or VN overlay."""
-    meta = _SENTENCE_META.get(str(sentence_id or ""))
-    if not meta:
+    meta = _SENTENCE_META.get(str(sentence_id or "")) or {}
+    if not meta and not _companion_overlay_url():
         return
     await _publish_overlay(meta, display_text=str(meta.get("display_text") or "") if speaking else "",
                            raw_text="", source="vn_playback", sentence_id=sentence_id, speaking=speaking)
