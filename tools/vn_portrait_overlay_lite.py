@@ -163,7 +163,8 @@ def main():
     args = parser.parse_args()
     overlay = overlay_class()(lite_dir=args.lite_dir, static_idle=args.static_idle,
                               host=args.host, port=args.port, x=args.x, y=args.y,
-                              backend_url=args.backend_url, on_close=args.on_close)
+                              backend_url=args.backend_url, on_close=args.on_close,
+                              companion_controls=args.companion_controls)
     return overlay.run()
 
 

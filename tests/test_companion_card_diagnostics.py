@@ -22,6 +22,12 @@ def _host(root: Path, **overrides) -> CompanionCardHost:
     )
 
 
+def test_card_entrypoint_passes_the_companion_controls_flag():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "tools" / "vn_portrait_overlay_lite.py").read_text(encoding="utf-8")
+    assert "companion_controls=args.companion_controls" in source
+
+
 def test_missing_card_log_reads_as_empty(tmp_path):
     host = _host(tmp_path)
     assert host.card_log_tail() == ""
