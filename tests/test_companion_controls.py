@@ -88,7 +88,7 @@ def test_companion_controls_stop_voice() -> None:
 def test_companion_character_switch_reloads_voice_model() -> None:
     async def run() -> None:
         handler = CompanionControlHandler()
-        character = {"id": "yachiyo", "name": "ルナミヤチヨ"}
+        character = {"id": "yachiyo", "name": "月见八千代"}
         with patch(
             "core.character_profile.switch_character",
             return_value=character,

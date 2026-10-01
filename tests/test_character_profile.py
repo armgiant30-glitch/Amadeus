@@ -9,6 +9,7 @@ def test_character_profiles_expose_existing_assets() -> None:
     characters = {item["id"]: item for item in list_characters()}
     assert "kurisu" in characters
     assert "yachiyo" in characters
+    assert characters["yachiyo"]["name"] == "月见八千代"
     assert characters["kurisu"]["art_dir"].endswith("assets\\companion\\kurisu")
     assert characters["yachiyo"]["voice_audio"].endswith("yachiyo_reference.wav")
     assert characters["yachiyo"]["voice_sovits_model"].endswith("yachiyo_e8_s288_l32.pth")
