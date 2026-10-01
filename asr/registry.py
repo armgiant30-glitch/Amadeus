@@ -137,7 +137,7 @@ def _qwen_remote_probe() -> tuple[str, str]:
         or str(settings.DASHSCOPE_API_KEY or "").strip()
     )
     if not api_key:
-        return "unavailable", "DASHSCOPE_API_KEY is not configured"
+        return "unavailable", "QWEN_REMOTE_ASR_API_KEY or DASHSCOPE_API_KEY is not configured"
     if not str(settings.QWEN_REMOTE_ASR_MODEL or "").strip():
         return "unavailable", "QWEN_REMOTE_ASR_MODEL is not configured"
     return "remote", "DashScope Qwen remote ASR configured; availability is checked on use"
