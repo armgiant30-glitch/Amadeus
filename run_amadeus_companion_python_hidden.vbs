@@ -24,8 +24,6 @@ env("TTS_REF_AUDIO_JA") = "./assets/audio/reference/kurisu_reference.wav"
 ' Qwen3-ASR model; this launcher must not do that. Conversation backend only.
 env("ASR_BACKEND") = "qwen_remote"
 env("QWEN3_ASR_DEVICE") = "cpu"
-env("MICROPHONE_DEVICE_INDEX") = "1"
-env("MICROPHONE_PREFERRED_NAME") = ""
 
 root = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
 shell.CurrentDirectory = root
