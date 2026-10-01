@@ -1187,6 +1187,7 @@ class SystemHandler(RequestHandler):
         import tts.pipeline as tts_pipeline
         from core.chat_runtime import get_chat_runtime
         vision = visual_runtime.get_config()
+        vision_capability = visual_runtime.provider_availability()
         chat_runtime = get_chat_runtime()
         from asr.registry import asr_backend_statuses
         from llm.local_backends import hybrid_local_status, local_backend_status
@@ -1254,6 +1255,9 @@ class SystemHandler(RequestHandler):
             "vision_mode": vision.get("mode", "off"),
             "vision_scope": vision.get("scope", "full_screen"),
             "vision_provider": vision.get("provider", "auto"),
+            "vision_provider_available": bool(vision_capability.get("available")),
+            "vision_provider_resolved": str(vision_capability.get("provider") or ""),
+            "vision_provider_model": str(vision_capability.get("model") or ""),
             "vision_max_long_side": vision.get("max_long_side", 960),
             "vision_jpeg_quality": vision.get("jpeg_quality", 68),
             "vision_region": vision.get("region", ""),

@@ -90,6 +90,49 @@ class VisionConfig:
 
 _config = VisionConfig()
 
+# Vision provider -> (credential setting, model setting). The chat provider
+# (LLM_PROVIDER) and the vision provider (AMADEUS_VISION_PROVIDER) are
+# independent: a text-only chat provider such as DeepSeek is perfectly usable
+# for visual turns as long as a dedicated vision provider is configured here and
+# has credentials. Keep this the single source of truth so the chat-turn routing
+# and the desktop UI gate can never disagree about whether vision works.
+_VISION_PROVIDER_KEYS: dict[str, tuple[str, str]] = {
+    "qwen": ("DASHSCOPE_API_KEY", "QWEN_VL_MODEL_NAME"),
+    "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL_NAME"),
+    "openai": ("OPENAI_API_KEY", "OPENAI_MODEL_NAME"),
+}
+
+
+def provider_availability() -> dict[str, Any]:
+    """Report which vision provider would serve a frame and whether it can."""
+
+    configured = str(_config.provider or "auto").strip().lower()
+    try:
+        from config import settings
+    except Exception:  # pragma: no cover - availability must never raise
+        settings = None
+
+    def _setting(name: str) -> str:
+        return str(getattr(settings, name, "") or "").strip() if settings is not None else ""
+
+    usable = {
+        name: bool(_setting(credential))
+        for name, (credential, _model) in _VISION_PROVIDER_KEYS.items()
+    }
+    if configured in usable:
+        resolved = configured
+    elif configured == "auto":
+        resolved = next((name for name in ("qwen", "gemini", "openai") if usable[name]), "")
+    else:
+        resolved = ""
+    if not resolved:
+        return {"provider": configured, "available": False, "model": ""}
+    return {
+        "provider": resolved,
+        "available": True,
+        "model": _setting(_VISION_PROVIDER_KEYS[resolved][1]),
+    }
+
 
 def get_config() -> dict[str, Any]:
     return asdict(_config)

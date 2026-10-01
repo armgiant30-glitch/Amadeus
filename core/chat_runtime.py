@@ -1455,21 +1455,22 @@ class ChatRuntime:
         _visual_context = visual_context if isinstance(visual_context, dict) else None
         _text_only_question = question
         if _visual_context:
-            from llm.visual_context import visual_notice_text
+            from llm.visual_context import provider_supports_direct_image, visual_notice_text
 
             _text_only_question = visual_notice_text(question, _visual_context, supported=False)
 
-        # ── 视觉 provider 路由：主模型收不了图时，带视觉的轮次整体走 Gemini ──
-        # DeepSeek/local 不支持图片输入；当本轮携带视觉帧（用户附图或屏幕截图）
-        # 时，把整个轮次路由到配置的视觉 provider（Gemini），让视觉模型真正看图，
-        # 而不是让主模型假装看见。
-        if _visual_context and llm_provider not in {"openai", "gemini", "hybrid3"}:
-            # Vision-capable remote: DeepSeek/local cannot receive images.
-            # Route the visual turn through Qwen VL on DashScope (the user's
-            # working DashScope key), keeping the main model unchanged.
-            from config import settings as _vision_settings
+        # ── 视觉 provider 路由：主模型收不了图时，带视觉的轮次整体走专用视觉模型 ──
+        # 判定依据是 server.visual_runtime.provider_availability()（凭据是否齐），
+        # 与桌面端 UI 的闸门同源，避免两边结论不一致。
+        if _visual_context and not provider_supports_direct_image(llm_provider, DEEPSEEK_MODEL_NAME):
+            try:
+                from server import visual_runtime as _vision_runtime
 
-            if str(getattr(_vision_settings, "DASHSCOPE_API_KEY", "") or "").strip():
+                _vision_route = _vision_runtime.provider_availability()
+            except Exception:
+                logger.exception("vision provider availability check failed")
+                _vision_route = {}
+            if _vision_route.get("available") and _vision_route.get("provider") == "qwen":
                 llm_provider = "qwen_vision"
         st = _TurnState(
             gui_callback=gui_callback, turn_id=turn_id, question=_original_question,
