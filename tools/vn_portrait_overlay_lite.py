@@ -41,6 +41,24 @@ def overlay_class(shell=vn_overlay_window):
             else:
                 super()._load_frames()
 
+        def reload_character_pack(self, new_dir):
+            target = Path(new_dir)
+            if not (target / "manifest.json").is_file():
+                return False
+            try:
+                replacement = AtlasPlayer(target)
+            except Exception:
+                return False
+            previous = self._lite
+            self._lite = replacement
+            self._lite_dir = target
+            if previous is not None:
+                previous.close()
+            self._sentence_id = ""
+            self._set_emotion("normal", "idle")
+            self._draw_lite()
+            return True
+
         def _resolve_key(self, emotion):
             if not self._lite:
                 return super()._resolve_key(emotion)

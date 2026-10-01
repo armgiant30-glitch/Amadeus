@@ -576,10 +576,25 @@ def get_sovits_params(text: str, is_first_sentence: bool = False):
 # =============================================================================
 
 # 参考音频 / 文本：始终跟随全局 TTS_OUTPUT_LANGUAGE（由用户设置按钮控制）
+def _active_character_voice() -> dict:
+    try:
+        from core.character_profile import active_voice
+
+        return active_voice() or {}
+    except Exception:
+        return {}
+
+
 def _get_ref_audio(text: str = "") -> str:
+    voice = _active_character_voice()
+    if voice.get("audio"):
+        return str(voice["audio"])
     return TTS_REF_AUDIO_EN if TTS_OUTPUT_LANGUAGE == "英文" else TTS_REF_AUDIO_JA
 
 def _get_ref_text(text: str = "") -> str:
+    voice = _active_character_voice()
+    if voice.get("text"):
+        return str(voice["text"])
     return TTS_REF_TEXT_EN if TTS_OUTPUT_LANGUAGE == "英文" else TTS_REF_TEXT_JA
 
 # 向后兼容：模块级常量保留但指向当前语言的默认值（warmup 等地方直接引用时使用）

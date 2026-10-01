@@ -13,7 +13,13 @@ ChatSend = Callable[[str, bool], Awaitable[dict[str, Any] | None]]
 
 
 class CompanionControlHandler(RequestHandler):
-    methods = [Method.COMPANION_STATUS, Method.COMPANION_INPUT_SET]
+    methods = [
+        Method.COMPANION_STATUS,
+        Method.COMPANION_INPUT_SET,
+        Method.COMPANION_CHARACTER_LIST,
+        Method.COMPANION_CHARACTER_SWITCH,
+        Method.COMPANION_CHARACTER_STATUS,
+    ]
 
     def __init__(self) -> None:
         self._asr_control: AsyncCall | None = None
@@ -75,6 +81,21 @@ class CompanionControlHandler(RequestHandler):
             return self.status()
         if method == Method.COMPANION_INPUT_SET:
             return await self._set_inputs(params)
+        if method == Method.COMPANION_CHARACTER_LIST:
+            from core.character_profile import current_character, list_characters
+
+            return {"characters": list_characters(), "current": current_character()}
+        if method == Method.COMPANION_CHARACTER_SWITCH:
+            from core.character_profile import switch_character
+
+            character_id = str(params.get("character_id") or params.get("id") or "").strip()
+            if not character_id:
+                raise ValueError("character_id is required")
+            return {"ok": True, "character": switch_character(character_id)}
+        if method == Method.COMPANION_CHARACTER_STATUS:
+            from core.character_profile import current_character, list_characters
+
+            return {"current": current_character(), "characters": list_characters()}
         return None
 
     async def _set_inputs(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -118,6 +118,9 @@ class PortraitOverlayTk:
         self._game_busy = False
         self._game_status_text = ""
         self._game_window = None
+        self._character_busy = False
+        self._character_name = ""
+        self._character_window = None
         self._text_mode = False
         self.text_input_var = tk.StringVar(value="")
         self.text_input = (
@@ -144,7 +147,7 @@ class PortraitOverlayTk:
             self.text_input.bind("<Escape>", lambda _event: self._set_text_mode(False))
         self._tooltip = tk.Label(self.frame, bg="#0b282d", fg=CARD_TEXT, font=("Microsoft YaHei UI", -self._px(11)),
                                  wraplength=self._px(258), justify="left", padx=self._px(6), pady=self._px(4), bd=1, relief="solid")
-        control_names = ("voice", "text", "vision", "game") if self._companion_controls_mode else ("voice", "vision")
+        control_names = ("voice", "text", "vision", "game", "character") if self._companion_controls_mode else ("voice", "vision")
         for name in control_names:
             button = tk.Canvas(self.frame, width=28, height=28, bg=CARD_BG, highlightthickness=0, takefocus=True)
             button.bind("<Button-1>", lambda event, key=name: self._toggle_input(key))
@@ -335,6 +338,13 @@ class PortraitOverlayTk:
                 detail = "未连接"
             extra = f"\n{self._game_status_text}" if self._game_status_text else ""
             return selected, busy, enabled, "Game Companion · " + detail + extra
+        if name == "character":
+            busy = state["pending"] or self._character_busy
+            enabled = bool(state["connected"] and not busy)
+            detail = "正在切换…" if busy else (self._character_name or "当前角色")
+            if not state["connected"]:
+                detail = "未连接"
+            return bool(self._character_name), busy, enabled, "角色管理 · " + detail
         if name == "text":
             selected = bool(self._text_mode)
             busy = state["pending"] or item.get("starting", False)
@@ -389,6 +399,9 @@ class PortraitOverlayTk:
                 button.create_line(11, 13, 11, 17, fill=color, width=1.5)
                 button.create_oval(16, 12, 18, 14, outline=color, width=1.5)
                 button.create_oval(19, 15, 21, 17, outline=color, width=1.5)
+            elif name == "character":
+                button.create_oval(10, 5, 18, 13, outline=color, width=1.5)
+                button.create_arc(5, 12, 23, 26, start=0, extent=180, style="arc", outline=color, width=1.5)
             else:
                 button.create_rectangle(5, 9, 23, 22, outline=color, width=1.5)
                 button.create_line(9, 9, 11, 6, 17, 6, 19, 9, fill=color, width=1.5)
@@ -415,6 +428,8 @@ class PortraitOverlayTk:
     def _toggle_input(self, name):
         if name == "game":
             return self._toggle_game_companion()
+        if name == "character":
+            return self._toggle_character_menu()
         if name == "text":
             self._set_text_mode(not self._text_mode)
             return "break"
@@ -427,6 +442,90 @@ class PortraitOverlayTk:
             self._control_state = self._controls.snapshot()
             self._draw_controls()
         return "break"
+
+    def _toggle_character_menu(self):
+        if not self._companion_controls_mode or not self._controls:
+            return "break"
+        self._character_busy = True
+        self._draw_controls()
+        self._controls.request("companion.character.list", {}, callback=self._on_character_list)
+        return "break"
+
+    def _on_character_list(self, result):
+        self.root.after(0, lambda: self._show_character_profiles(result if isinstance(result, dict) else {}))
+
+    def _show_character_profiles(self, result):
+        if self._character_window is not None:
+            try:
+                self._character_window.destroy()
+            except Exception:
+                pass
+        characters = result.get("characters") if isinstance(result.get("characters"), list) else []
+        current = result.get("current") if isinstance(result.get("current"), dict) else {}
+        current_id = str(current.get("id") or "")
+        window = tk.Toplevel(self.root)
+        self._character_window = window
+        window.title("Character")
+        window.configure(bg=CARD_BG)
+        window.attributes("-topmost", True)
+        window.geometry(f"{self._px(360)}x{self._px(300)}+{self.root.winfo_x()}+{self.root.winfo_y() + self._px(40)}")
+        tk.Label(window, text="选择角色", bg=CARD_BG, fg=CARD_ACCENT,
+                 font=("Microsoft YaHei UI", -self._px(13), "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        if not characters:
+            tk.Label(window, text="没有可用角色包。", bg=CARD_BG, fg=CARD_TEXT,
+                     font=("Microsoft YaHei UI", -self._px(11))).pack(anchor="w", padx=12, pady=8)
+        else:
+            for character in characters[:12]:
+                character_id = str(character.get("id") or "")
+                label = str(character.get("name") or character_id or "Unnamed")
+                marker = "  ✓" if character_id == current_id else ""
+                button = tk.Button(
+                    window,
+                    text=f"{label}{marker}",
+                    bg="#0d3339", fg=CARD_TEXT, activebackground="#12444b",
+                    activeforeground=CARD_TEXT, anchor="w", relief="flat",
+                    font=("Microsoft YaHei UI", -self._px(11)),
+                    command=lambda value=character_id: self._switch_character(value),
+                )
+                button.pack(fill="x", padx=12, pady=3)
+        tk.Button(window, text="关闭", bg="transparent", fg="#9fc3bb", relief="flat",
+                  command=window.destroy).pack(anchor="e", padx=12, pady=(8, 10))
+
+    def _switch_character(self, character_id):
+        if not character_id or not self._controls:
+            return
+        if self._character_window is not None:
+            try:
+                self._character_window.destroy()
+            except Exception:
+                pass
+            self._character_window = None
+        self._character_busy = True
+        self._draw_controls()
+        self._controls.request(
+            "companion.character.switch",
+            {"character_id": character_id},
+            callback=self._on_character_switched,
+        )
+
+    def _on_character_switched(self, result):
+        self.root.after(0, lambda: self._handle_character_switched(result if isinstance(result, dict) else {}))
+
+    def _handle_character_switched(self, result):
+        error = str(result.get("error") or "").strip()
+        character = result.get("character") if isinstance(result.get("character"), dict) else {}
+        self._character_busy = False
+        if error:
+            self.text_var.set(f"Character: {error}")
+        else:
+            name = str(character.get("name") or character.get("id") or "").strip()
+            self._character_name = name
+            art_dir = str(character.get("art_dir") or "").strip()
+            reload_pack = getattr(self, "reload_character_pack", None)
+            if art_dir and callable(reload_pack):
+                reload_pack(art_dir)
+            self.text_var.set(f"Character: {name}" if name else "Character switched")
+        self._draw_controls()
 
     def _toggle_game_companion(self):
         if not self._companion_controls_mode or not self._controls:

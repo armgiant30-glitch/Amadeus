@@ -1,0 +1,10 @@
+{
+  "id": "yachiyo",
+  "name": "ルナミヤチヨ",
+  "art_dir": "",
+  "voice": {
+    "audio": "assets/audio/reference/yachiyo/neutral/BV1dPfMBZEgR_p2_pNA_0002.wav",
+    "text": "ここでお知らせ、ヤチヨコップっていうイベントを開催しまーす。"
+  },
+  "persona_file": "assets/characters/yachiyo/persona.txt"
+}

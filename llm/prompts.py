@@ -649,6 +649,15 @@ _EN_LANGUAGE_LOCK = (
 )
 
 
+def _character_persona_addon() -> str:
+    try:
+        from core.character_profile import active_persona
+
+        return str(active_persona() or "").strip()
+    except Exception:
+        return ""
+
+
 def get_system_prompt(
     variant: str = "with_delegate",
     *,
@@ -721,13 +730,15 @@ def get_system_prompt(
                     _EN_INTENT_TAIL,
                 )
             bedrock += control_envelope_prompt_addon(language="en")
-        return {
+        prompt = {
             "base":           _EN_BASE,
             "with_delegate":  with_delegate,
             "bedrock":        bedrock,
             "hybrid_local":   _EN_HYBRID_LOCAL,
             "local_fallback": _EN_LOCAL_FALLBACK,
         }.get(variant, with_delegate)
+        persona = _character_persona_addon()
+        return f"{persona}\n\n{prompt}" if persona else prompt
     else:
         with_delegate = (
             _JA_WITH_DELEGATE_TOOL
@@ -768,13 +779,15 @@ def get_system_prompt(
                     _JA_INTENT_TAIL,
                 )
             bedrock += control_envelope_prompt_addon(language="ja")
-        return {
+        prompt = {
             "base":           _JA_BASE,
             "with_delegate":  with_delegate,
             "bedrock":        bedrock,
             "hybrid_local":   _JA_HYBRID_LOCAL,
             "local_fallback": _JA_LOCAL_FALLBACK,
         }.get(variant, with_delegate)
+        persona = _character_persona_addon()
+        return f"{persona}\n\n{prompt}" if persona else prompt
 
 
 def get_delegate_control_prompt() -> str:
