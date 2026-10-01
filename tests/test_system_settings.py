@@ -49,6 +49,7 @@ def test_settings_connection_descriptors_never_return_secret_values() -> None:
         "ASR_API_KEY",
         "TTS_API_KEY",
         "MIMO_TTS_API_KEY",
+        "QWEN_REMOTE_ASR_API_KEY",
         "FISH_TTS_API_KEY",
     }
 

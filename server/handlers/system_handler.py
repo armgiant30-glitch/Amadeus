@@ -191,6 +191,56 @@ def _voice_configuration(settings: Any) -> list[dict[str, Any]]:
             ],
         },
         {
+            "id": "asr_qwen_remote",
+            "label": "Qwen remote ASR (DashScope)",
+            "description": "Native DashScope Qwen3-ASR upload and transcription. Used only when Conversation recognition selects qwen_remote.",
+            "active": asr_selected == "qwen_remote",
+            "configured": bool(
+                (settings.QWEN_REMOTE_ASR_API_KEY or settings.DASHSCOPE_API_KEY)
+                and settings.QWEN_REMOTE_ASR_MODEL
+            ),
+            "status": "remote" if asr_selected == "qwen_remote" else "available",
+            "status_ok": bool(
+                (settings.QWEN_REMOTE_ASR_API_KEY or settings.DASHSCOPE_API_KEY)
+                and settings.QWEN_REMOTE_ASR_MODEL
+            ),
+            "fields": [
+                _startup_field(
+                    "QWEN_REMOTE_ASR_BASE_URL",
+                    "API base URL",
+                    settings.QWEN_REMOTE_ASR_BASE_URL,
+                    field_type="url",
+                ),
+                _startup_field(
+                    "QWEN_REMOTE_ASR_API_KEY",
+                    "API key",
+                    field_type="secret",
+                    secret_configured=bool(
+                        settings.QWEN_REMOTE_ASR_API_KEY
+                        or settings.DASHSCOPE_API_KEY
+                    ),
+                ),
+                _startup_field(
+                    "QWEN_REMOTE_ASR_MODEL",
+                    "Model",
+                    settings.QWEN_REMOTE_ASR_MODEL,
+                ),
+                _startup_field(
+                    "QWEN_REMOTE_ASR_WORKSPACE",
+                    "Workspace",
+                    settings.QWEN_REMOTE_ASR_WORKSPACE,
+                    description="Optional DashScope workspace ID.",
+                ),
+                _startup_field(
+                    "QWEN_REMOTE_ASR_TRUST_ENV",
+                    "Use environment proxy",
+                    bool(settings.QWEN_REMOTE_ASR_TRUST_ENV),
+                    field_type="boolean",
+                    description="Off by default so a Fish-only local proxy does not intercept DashScope.",
+                ),
+            ],
+        },
+        {
             "id": "wake_asr",
             "label": "Wake recognition",
             "description": "Independent always-on recognizer. It can stay on SenseVoice while Conversation recognition uses Qwen or a remote API.",
