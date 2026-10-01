@@ -1,6 +1,8 @@
 """Input controls for the standalone Companion card."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Awaitable, Callable
 
 from server.event_bus import bus
@@ -10,6 +12,7 @@ from server.ws_handler import RequestHandler
 
 AsyncCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 ChatSend = Callable[[str, bool], Awaitable[dict[str, Any] | None]]
+logger = logging.getLogger(__name__)
 
 
 class CompanionControlHandler(RequestHandler):
@@ -91,7 +94,22 @@ class CompanionControlHandler(RequestHandler):
             character_id = str(params.get("character_id") or params.get("id") or "").strip()
             if not character_id:
                 raise ValueError("character_id is required")
-            return {"ok": True, "character": switch_character(character_id)}
+            character = switch_character(character_id)
+            voice_reload = {"ok": True, "reloaded": False, "error": ""}
+            try:
+                from tts.pipeline import reload_active_character_voice
+
+                voice_reload["reloaded"] = bool(
+                    await asyncio.to_thread(reload_active_character_voice)
+                )
+            except Exception as exc:
+                logger.exception("failed to reload character voice model")
+                voice_reload.update(ok=False, error=str(exc))
+            return {
+                "ok": True,
+                "character": character,
+                "voice_reload": voice_reload,
+            }
         if method == Method.COMPANION_CHARACTER_STATUS:
             from core.character_profile import current_character, list_characters
 

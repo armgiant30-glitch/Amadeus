@@ -27,6 +27,8 @@ class CharacterProfile:
     art_dir: str = ""
     voice_audio: str = ""
     voice_text: str = ""
+    voice_gpt_model: str = ""
+    voice_sovits_model: str = ""
     persona_file: str = ""
     persona_prompt: str = ""
 
@@ -37,6 +39,8 @@ class CharacterProfile:
             "art_dir": self.art_dir,
             "voice_audio": self.voice_audio,
             "voice_text": self.voice_text,
+            "voice_gpt_model": self.voice_gpt_model,
+            "voice_sovits_model": self.voice_sovits_model,
             "persona_file": self.persona_file,
             "persona_prompt": self.persona_prompt,
         }
@@ -76,6 +80,8 @@ def _read_profile(path: Path) -> CharacterProfile | None:
         art_dir=_resolve(str(payload.get("art_dir") or "")),
         voice_audio=_resolve(str(voice.get("audio") or "")),
         voice_text=str(voice.get("text") or "").strip(),
+        voice_gpt_model=_resolve(str(voice.get("gpt_model") or payload.get("gpt_model") or "")),
+        voice_sovits_model=_resolve(str(voice.get("sovits_model") or payload.get("sovits_model") or "")),
         persona_file=persona_file,
         persona_prompt=persona_prompt,
     )
@@ -137,7 +143,13 @@ class CharacterStore:
         profile = self.current()
         if profile is None:
             return {}
-        return {"audio": profile.voice_audio, "text": profile.voice_text, "name": profile.name}
+        return {
+            "audio": profile.voice_audio,
+            "text": profile.voice_text,
+            "gpt_model": profile.voice_gpt_model,
+            "sovits_model": profile.voice_sovits_model,
+            "name": profile.name,
+        }
 
     def active_persona(self) -> str:
         profile = self.current()

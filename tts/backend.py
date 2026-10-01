@@ -51,6 +51,10 @@ class BaseTTSBackend(ABC):
     def close(self) -> None:
         """Release optional backend resources."""
 
+    def reload_active_voice(self) -> bool:
+        """Reload model weights owned by the active character profile."""
+        return False
+
 
 def _language_code(value: str) -> str:
     clean = str(value or "").strip().lower()
@@ -86,6 +90,10 @@ class TTSRuntimeAdapter:
     @property
     def is_rocm(self) -> bool:
         return bool(getattr(self.backend, "is_rocm", False))
+
+    def reload_active_voice(self) -> bool:
+        reload = getattr(self.backend, "reload_active_voice", None)
+        return bool(reload()) if callable(reload) else False
 
     @staticmethod
     def _request(

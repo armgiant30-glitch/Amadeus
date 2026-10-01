@@ -322,12 +322,21 @@ class CompanionCardHost:
             self._publish_surface_url()
             return self.status()
 
+        try:
+            from core.character_profile import active_art_dir
+
+            configured_art_dir = Path(active_art_dir())
+        except Exception:
+            configured_art_dir = Path()
+        lite_dir = configured_art_dir if (configured_art_dir / "manifest.json").is_file() else (
+            self.project_root / "assets" / "companion" / "kurisu"
+        )
         args = [
             self._interpreter(),
             str(helper),
             "--host", self.host,
             "--port", str(self.port),
-            "--lite-dir", str(self.project_root / "assets" / "companion" / "kurisu"),
+            "--lite-dir", str(lite_dir),
             "--x", str(self.x),
             "--y", str(self.y),
             "--on-close", "card-close",

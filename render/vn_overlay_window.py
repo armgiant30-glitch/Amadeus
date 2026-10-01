@@ -488,7 +488,7 @@ class PortraitOverlayTk:
                     command=lambda value=character_id: self._switch_character(value),
                 )
                 button.pack(fill="x", padx=12, pady=3)
-        tk.Button(window, text="关闭", bg="transparent", fg="#9fc3bb", relief="flat",
+        tk.Button(window, text="关闭", bg=CARD_BG, fg="#9fc3bb", relief="flat",
                   command=window.destroy).pack(anchor="e", padx=12, pady=(8, 10))
 
     def _switch_character(self, character_id):
@@ -524,7 +524,12 @@ class PortraitOverlayTk:
             reload_pack = getattr(self, "reload_character_pack", None)
             if art_dir and callable(reload_pack):
                 reload_pack(art_dir)
-            self.text_var.set(f"Character: {name}" if name else "Character switched")
+            voice_reload = result.get("voice_reload")
+            voice_failed = isinstance(voice_reload, dict) and not bool(voice_reload.get("ok", True))
+            if voice_failed:
+                self.text_var.set(f"Character: {name} · voice reload failed")
+            else:
+                self.text_var.set(f"Character: {name}" if name else "Character switched")
         self._draw_controls()
 
     def _toggle_game_companion(self):
@@ -589,7 +594,7 @@ class PortraitOverlayTk:
                     command=lambda value=profile_id: self._start_game_profile(value),
                 )
                 button.pack(fill="x", padx=12, pady=3)
-        tk.Button(window, text="关闭", bg="transparent", fg="#9fc3bb", relief="flat",
+        tk.Button(window, text="关闭", bg=CARD_BG, fg="#9fc3bb", relief="flat",
                   command=window.destroy).pack(anchor="e", padx=12, pady=(8, 10))
 
     def _start_game_profile(self, profile_id):

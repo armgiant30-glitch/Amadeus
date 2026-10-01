@@ -1,3 +1,4 @@
+import gc
 import os
 import sys
 import time
@@ -587,6 +588,46 @@ class TTSInferencer:
         # 如果是v3模型，还需加载BigVGAN
         if self.model_version == "v3":
             self._load_bigvgan_model()
+
+    def reload_sovits(self, sovits_path: str) -> bool:
+        """Hot-swap a compatible SoVITS checkpoint without rebuilding GPT."""
+        target = os.path.abspath(os.fspath(sovits_path))
+        if not os.path.isfile(target):
+            raise FileNotFoundError(f"SoVITS checkpoint not found: {target}")
+        current = os.path.abspath(os.fspath(self.sovits_path))
+        if target == current:
+            return False
+
+        previous_path = self.sovits_path
+        previous_version = self.model_version
+        previous_sovits_version = getattr(self, "sovits_version", "")
+        previous_detected_lora = getattr(self, "_detected_lora", False)
+        self._session_cache.clear()
+        self.sovits_path = target
+        try:
+            detected_version = self._detect_model_version()
+            if detected_version != previous_version:
+                raise ValueError(
+                    "SoVITS hot reload requires the same model version: "
+                    f"{previous_version!r} -> {detected_version!r}"
+                )
+            self._load_sovits_model()
+        except Exception:
+            self.sovits_path = previous_path
+            self.model_version = previous_version
+            self.sovits_version = previous_sovits_version
+            self._detected_lora = previous_detected_lora
+            try:
+                self._load_sovits_model()
+            except Exception:
+                logger.exception("failed to restore previous SoVITS checkpoint")
+            raise
+
+        gc.collect()
+        if self._uses_torch_cuda_api:
+            torch.cuda.empty_cache()
+        logger.info("SoVITS checkpoint reloaded: %s", target)
+        return True
 
     def _load_gpt_model(self):
         """加载GPT模型"""

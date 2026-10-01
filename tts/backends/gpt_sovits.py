@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import gc
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ class GPTSoVITSBackend(BaseTTSBackend):
         self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=50)
         self._ready_info: dict[str, Any] = {}
+        self._model_paths: tuple[str, str] = ("", "")
 
     @property
     def is_rocm(self) -> bool:
@@ -77,8 +79,11 @@ class GPTSoVITSBackend(BaseTTSBackend):
     def load(self) -> None:
         if self._inferencer is not None or self._is_running():
             return
+        from tts.model_paths import resolve_active_tts_model_paths
+
+        gpt_model, sovits_model = resolve_active_tts_model_paths()
         if self._sidecar_enabled():
-            self._load_sidecar()
+            self._load_sidecar(gpt_model, sovits_model)
             return
         self.deployment = "embedded"
         from config import settings
@@ -86,9 +91,10 @@ class GPTSoVITSBackend(BaseTTSBackend):
 
         self._inferencer = TTSInferencer(
             device=settings.TTS_DEVICE,
-            gpt_path=settings.TTS_GPT_MODEL_PATH or None,
-            sovits_path=settings.TTS_SOVITS_MODEL_PATH or None,
+            gpt_path=gpt_model or None,
+            sovits_path=sovits_model or None,
         )
+        self._model_paths = (gpt_model, sovits_model)
 
     def _is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -122,13 +128,20 @@ class GPTSoVITSBackend(BaseTTSBackend):
                 "GPT-SoVITS sidecar emitted invalid JSON on stdout"
             ) from exc
 
-    def _load_sidecar(self) -> None:
+    def _load_sidecar(self, gpt_model: str = "", sovits_model: str = "") -> None:
         python = os.environ.get("TTS_PYTHON", "").strip() or sys.executable
         if not Path(python).is_file():
             raise FileNotFoundError(f"GPT-SoVITS sidecar Python not found: {python}")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         proc = subprocess.Popen(
-            [python, str(_SIDECAR_SCRIPT)],
+            [
+                python,
+                str(_SIDECAR_SCRIPT),
+                "--gpt-model",
+                gpt_model,
+                "--sovits-model",
+                sovits_model,
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -150,6 +163,7 @@ class GPTSoVITSBackend(BaseTTSBackend):
                 detail = message.get("msg") or message
                 raise TTSBackendError(f"GPT-SoVITS sidecar failed to load: {detail}")
             self._ready_info = dict(message)
+            self._model_paths = (gpt_model, sovits_model)
             self.deployment = "subprocess"
             logger.info(
                 "[TTS:GPT-SoVITS] sidecar ready "
@@ -168,6 +182,93 @@ class GPTSoVITSBackend(BaseTTSBackend):
         if self._inferencer is None:
             raise RuntimeError("GPT-SoVITS inferencer is unavailable")
         return self._inferencer
+
+    @staticmethod
+    def _release_inferencer(inferencer: Any) -> None:
+        close = getattr(inferencer, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                logger.warning("[TTS:GPT-SoVITS] failed to close inferencer: %s", exc)
+        del inferencer
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def _reload_embedded(self, model_paths: tuple[str, str]) -> bool:
+        from config import settings
+        from local_tts_infer import TTSInferencer
+
+        with self._io_lock:
+            self.load()
+            if self._model_paths == model_paths and self._inferencer is not None:
+                return False
+
+            gpt_model, sovits_model = model_paths
+            inferencer = self._inferencer
+            reload_sovits = getattr(inferencer, "reload_sovits", None)
+            if (
+                inferencer is not None
+                and self._model_paths[0] == gpt_model
+                and callable(reload_sovits)
+            ):
+                reload_sovits(sovits_model)
+                self._model_paths = model_paths
+                logger.info("[TTS:GPT-SoVITS] reloaded character SoVITS weights")
+                return True
+
+            replacement = TTSInferencer(
+                device=settings.TTS_DEVICE,
+                gpt_path=gpt_model or None,
+                sovits_path=sovits_model or None,
+            )
+            previous = self._inferencer
+            self._inferencer = replacement
+            self._model_paths = model_paths
+
+        self._release_inferencer(previous)
+        logger.info("[TTS:GPT-SoVITS] reloaded character model pair")
+        return True
+
+    def reload_active_voice(self) -> bool:
+        """Swap weights when the selected character changes.
+
+        SoVITS-only changes reuse the loaded GPT/BERT/SSL/BigVGAN runtime and
+        replace only the acoustic model.  A GPT change falls back to a full
+        inferencer rebuild so future character packs are not artificially
+        restricted to one checkpoint layout.
+        """
+
+        from tts.model_paths import resolve_active_tts_model_paths
+
+        model_paths = resolve_active_tts_model_paths()
+        if model_paths == self._model_paths and (
+            self._inferencer is not None or self._is_running()
+        ):
+            return False
+
+        if self._sidecar_enabled():
+            with self._io_lock:
+                self.load()
+                if self._model_paths == model_paths:
+                    return False
+                proc, request_id = self._send_payload_locked(
+                    "reload_model",
+                    {"gpt_model": model_paths[0], "sovits_model": model_paths[1]},
+                )
+                for _ in self._messages_for_request_locked(proc, request_id):
+                    pass
+            self._model_paths = model_paths
+            logger.info("[TTS:GPT-SoVITS] sidecar character weights reloaded")
+            return True
+
+        return self._reload_embedded(model_paths)
 
     @staticmethod
     def _serialize_request(request: TTSSynthesisRequest) -> dict[str, Any]:
@@ -203,6 +304,13 @@ class GPTSoVITSBackend(BaseTTSBackend):
         operation: str,
         request: TTSSynthesisRequest,
     ) -> tuple[subprocess.Popen[bytes], str]:
+        return self._send_payload_locked(operation, self._serialize_request(request))
+
+    def _send_payload_locked(
+        self,
+        operation: str,
+        request: dict[str, Any],
+    ) -> tuple[subprocess.Popen[bytes], str]:
         self.load()
         proc = self._proc
         if proc is None or proc.stdin is None or proc.poll() is not None:
@@ -213,7 +321,7 @@ class GPTSoVITSBackend(BaseTTSBackend):
                 {
                     "type": operation,
                     "request_id": request_id,
-                    "request": self._serialize_request(request),
+                    "request": request,
                 },
                 ensure_ascii=True,
             ).encode("utf-8") + b"\n"
@@ -299,10 +407,11 @@ class GPTSoVITSBackend(BaseTTSBackend):
                     f"GPT-SoVITS sidecar returned {len(chunks)} chunks for non-streaming inference"
                 )
             return chunks[0]
-        sample_rate, audio = self._ready().infer(
-            text=request.text,
-            **self._kwargs(request, streaming=False),
-        )
+        with self._io_lock:
+            sample_rate, audio = self._ready().infer(
+                text=request.text,
+                **self._kwargs(request, streaming=False),
+            )
         return TTSAudioChunk(int(sample_rate), audio, request.text)
 
     def synthesize_stream(self, request: TTSSynthesisRequest):
@@ -311,13 +420,14 @@ class GPTSoVITSBackend(BaseTTSBackend):
             return
         kwargs = self._kwargs(request, streaming=True)
         kwargs["chunk_size_seconds"] = request.chunk_size_seconds
-        for item in self._ready().infer_stream(text=request.text, **kwargs):
-            if len(item) == 2:
-                sample_rate, audio = item
-                text = ""
-            else:
-                sample_rate, audio, text = item
-            yield TTSAudioChunk(int(sample_rate), audio, str(text or ""))
+        with self._io_lock:
+            for item in self._ready().infer_stream(text=request.text, **kwargs):
+                if len(item) == 2:
+                    sample_rate, audio = item
+                    text = ""
+                else:
+                    sample_rate, audio, text = item
+                yield TTSAudioChunk(int(sample_rate), audio, str(text or ""))
 
     def close(self) -> None:
         inferencer = self._inferencer

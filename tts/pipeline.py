@@ -585,6 +585,36 @@ def _active_character_voice() -> dict:
         return {}
 
 
+def reload_active_character_voice() -> bool:
+    """Reload model weights after the selected character profile changes."""
+    runtime = _tts_runtime
+    if runtime is None:
+        return False
+    reload = getattr(runtime, "reload_active_voice", None)
+    if not callable(reload):
+        return False
+    reloaded = bool(reload())
+    if reloaded:
+        logger.info("[TTS] active character voice reloaded")
+    return reloaded
+
+
+def _normalize_ja_for_tts(text: str) -> str:
+    """Normalize Latin letters for the Japanese GPT-SoVITS frontend."""
+    if not text or TTS_OUTPUT_LANGUAGE == "英文":
+        return text
+    try:
+        from tts.ja_text_norm import norm_ja
+
+        out = norm_ja(text)
+    except Exception as exc:
+        logger.warning("[TTS-NORM] normalization unavailable; keeping source text: %s", exc)
+        return text
+    if out != text:
+        logger.info("[TTS-NORM] ja text normalized: %d -> %d chars", len(text), len(out))
+    return out
+
+
 def _get_ref_audio(text: str = "") -> str:
     voice = _active_character_voice()
     if voice.get("audio"):
@@ -764,6 +794,7 @@ async def speak_stream_enhanced(
     if tts_text != text:
         logger.info(f"[TTS-TEXT-FILTER] removed full-width parentheses: {sentence_id}")
     tts_text = correct_pronunciation_for_tts(tts_text)
+    tts_text = _normalize_ja_for_tts(tts_text)
     processed_text = tts_text
 
     logger.info(
@@ -911,6 +942,7 @@ async def speak_stream_enhanced_asyncio_queue(
     tts_text = _strip_tts_fullwidth_parentheses(text)
     if tts_text != text:
         logger.info(f"[TTS-TEXT-FILTER] removed full-width parentheses: {sentence_id}")
+    tts_text = _normalize_ja_for_tts(tts_text)
     params = get_sovits_params(tts_text, is_first_sentence)
     if rocm and params["sample_steps"] > 16:
         params["sample_steps"] = 16

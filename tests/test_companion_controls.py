@@ -83,3 +83,29 @@ def test_companion_controls_stop_voice() -> None:
         assert result["inputs"]["voice"]["enabled"] is False
 
     asyncio.run(run())
+
+
+def test_companion_character_switch_reloads_voice_model() -> None:
+    async def run() -> None:
+        handler = CompanionControlHandler()
+        character = {"id": "yachiyo", "name": "ルナミヤチヨ"}
+        with patch(
+            "core.character_profile.switch_character",
+            return_value=character,
+        ), patch(
+            "tts.pipeline.reload_active_character_voice",
+            return_value=True,
+        ) as reload_voice:
+            result = await handler.handle(
+                Method.COMPANION_CHARACTER_SWITCH,
+                {"character_id": "yachiyo"},
+            )
+        reload_voice.assert_called_once_with()
+        assert result["character"] == character
+        assert result["voice_reload"] == {
+            "ok": True,
+            "reloaded": True,
+            "error": "",
+        }
+
+    asyncio.run(run())
