@@ -75,6 +75,14 @@ def is_vn_sentence(sentence_id: str) -> bool:
     return str(sentence_id or "") in _SENTENCE_META
 
 
+def register_sentence_metadata(sentence_id: str, metadata: dict[str, Any]) -> None:
+    """Register presentation metadata for a sentence from the shared TTS queue."""
+
+    clean_id = str(sentence_id or "").strip()
+    if clean_id and isinstance(metadata, dict):
+        _SENTENCE_META[clean_id] = dict(metadata)
+
+
 def get_vn_sentence_metadata(sentence_id: str) -> dict[str, Any] | None:
     """Return a bounded copy of host playback identity for one queued line."""
 
@@ -731,7 +739,7 @@ async def _publish_overlay(
     payload = {
         "text": raw_text,
         "display_text": display_text,
-        "emotion": str((meta or {}).get("emotion") or "thinking"),
+        "emotion": str((meta or {}).get("emotion") or "normal"),
         "duration_ms": int((meta or {}).get("duration_ms") or 6500),
         "line_id": str((meta or {}).get("line_id") or ""),
         "script_id": str((meta or {}).get("script_id") or ""),

@@ -1970,6 +1970,21 @@ class ChatRuntime:
         if all_expr_acts:
             _get_expr_ctrl().register_sentence_actions(sentence_id, all_expr_acts)
 
+        emotion = ""
+        for action in all_expr_acts:
+            if str(action.get("type") or "").upper() != "EMO":
+                continue
+            attrs = action.get("attrs") if isinstance(action.get("attrs"), dict) else {}
+            emotion = str(attrs.get("preset") or attrs.get("name") or "").strip()
+            if emotion:
+                break
+        try:
+            from server.vn_tts_bridge import register_sentence_metadata
+
+            register_sentence_metadata(sentence_id, {"emotion": emotion})
+        except Exception:
+            logger.debug("sentence presentation metadata registration unavailable", exc_info=True)
+
         # 并行启动预翻译，不阻塞 TTS（CLI 本地路径关闭翻译，字幕在播放时显示）
         if translation and _pre_translation_enabled():
             asyncio.create_task(self._safe_start_translation(sentence_id, safe_text))
