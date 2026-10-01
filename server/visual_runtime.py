@@ -64,6 +64,8 @@ _VISION_TRIGGERS = (
     "这个窗口",
     "看到",
     "看得到",
+    "你觉得",
+    "你怎么看",
     "能看到",
     "what do you see",
     "look at",

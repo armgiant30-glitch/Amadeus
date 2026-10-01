@@ -51,6 +51,11 @@ def test_selected_window_scope_never_expands_to_full_screen(monkeypatch: pytest.
         )
 
 
+def test_natural_reading_questions_trigger_visual_context() -> None:
+    assert visual_runtime.is_visual_intent("你觉得这段怎么样？")
+    assert visual_runtime.is_visual_intent("你怎么看这一页？")
+
+
 def test_read_window_scope_captures_the_selected_reader(monkeypatch: pytest.MonkeyPatch) -> None:
     window = {
         "hwnd": "0x1234",
