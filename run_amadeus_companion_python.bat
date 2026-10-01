@@ -37,6 +37,7 @@ if not defined PYTHON if exist "D:\a\Amadeus\.venv_cu124\Scripts\python.exe" set
 if not defined PYTHON if exist ".venv_cu124\Scripts\python.exe" set "PYTHON=.venv_cu124\Scripts\python.exe"
 if not defined PYTHON set "PYTHON=python"
 
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop_amadeus_companion.ps1" >NUL 2>&1
 echo [Companion] starting Python backend and Tk card...
 echo [Companion] There will be no Electron window.
 echo [Companion] Close the card (right-click) to end the session.

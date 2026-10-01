@@ -262,7 +262,7 @@ class CompanionCardHost:
         log_path = self.card_log_path()
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+            log_file = open(log_path, "w", encoding="utf-8", buffering=1)
         except OSError as error:
             # A card that cannot be diagnosed is worse than a card without a
             # log, but it must never block startup; say so and keep going.

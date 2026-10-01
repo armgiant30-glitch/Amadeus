@@ -30,5 +30,7 @@ env("MICROPHONE_PREFERRED_NAME") = ""
 root = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
 shell.CurrentDirectory = root
 logPath = root & "\runtime\companion\python-hidden.log"
+stopScript = root & "\stop_amadeus_companion.ps1"
+shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & stopScript & """", 0, True
 cmd = "cmd.exe /d /c """"D:\a\Amadeus\.venv_cu124\Scripts\python.exe"" -m server.app --port 17777 --companion >> """ & logPath & """ 2>&1"""
 shell.Run cmd, 0, False
