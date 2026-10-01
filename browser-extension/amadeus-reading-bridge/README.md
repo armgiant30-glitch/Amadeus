@@ -1,6 +1,6 @@
 # Amadeus Reading Bridge
 
-Chrome/Edge extension for sending selected text from web novels, browser PDFs, and online manga pages to Amadeus Companion.
+Chrome/Edge extension for sending reading context from web novels, browser PDFs, online articles and manga pages to Amadeus Companion.
 
 ## Load
 
@@ -12,30 +12,34 @@ Chrome/Edge extension for sending selected text from web novels, browser PDFs, a
 
 ## Use
 
+### Start reading automatically
+
+1. Open a chapter or article page.
+2. Click the extension button.
+3. Click **开始阅读**.
+4. The bridge captures the current chapter and, when the site exposes a same-origin next-chapter link, the next chapter too.
+5. The current chapter becomes allowed reading context. The next chapter is stored as future text and is blocked by SpoilerGuard until you advance.
+
+### Send only a selected excerpt
+
 1. Select text in the page.
-2. Click the extension button or press `Ctrl+Shift+Y`.
+2. Click **发送当前选中文本** or press `Ctrl+Shift+Y`.
 3. Amadeus receives a `reading.selection` event and can use it as reading context.
 
-## What it sends, and what it cannot know
+## What it sends
 
-| Field | Source | Accuracy |
-|---|---|---|
-| `book_id` | FNV-1a hash of the page URL | Stable per URL, so two chapters of one book are two ids |
-| `cursor` / `selected_start` / `selected_end` | Monotonic character count kept per URL in `chrome.storage.local` | Approximate: it counts characters received, not positions in the book |
-| `chapter` | First `h1`/`h2`/`h3`/`[role=heading]`, falling back to the page title | Good on novel sites, wrong on sites that use a heading for the site name |
-| `page` | Omitted | The generic client has no page number. Note the adapter treats an omitted page as "unknown" and clears any stored page, so a reader-specific client that knows the real page should send it |
+- Page URL and a stable book key derived from the URL.
+- Chapter title.
+- Paragraph-preserving chapter text.
+- `cursor` and `spoiler_cursor`.
+- One chunk per captured chapter when automatic reading starts.
+- Chapter chunks include `id`, `chapter`, `start_offset`, `end_offset`, `text`, and `page: null`.
 
-A reader-specific client (Calibre, KOReader, an EPUB viewer) can send exact
-chapter, page and offset values through the same `/reading/event` endpoint.
+## Limitations
 
-## Why this is an extension and not a bookmarklet
+- The extension heuristic needs a normal article/chapter DOM. Highly scripted or canvas-based readers may need a reader-specific adapter.
+- It captures the next chapter only when the link is same-origin and fetchable. Cross-origin, login-protected or rate-limited pages may fall back to the current chapter only.
+- The generic web client does not know exact PDF page numbers. A reader-specific client can send precise `chapter`, `page` and offsets through the same `/reading/event` endpoint.
+- The adapter is loopback-only and unauthenticated. This is why the client is an extension, not a page bookmarklet.
 
-The adapter is a bare `BaseHTTPRequestHandler` on loopback: it sends no CORS
-headers and answers no `OPTIONS` preflight, so a normal page `fetch` with a JSON
-body cannot reach it. An extension works because its `host_permissions` entry for
-`http://127.0.0.1:17878/*` exempts its service worker from CORS. Anything else
-(a user script, a bookmarklet, another local tool) needs its own privileged
-context, or the adapter needs CORS support.
-
-See `docs/reading-bridge.md` for the full contract, verification steps and the
-limitations above in context.
+See `docs/reading-bridge.md` for the full contract.

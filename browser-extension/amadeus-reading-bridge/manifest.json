@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Amadeus Reading Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Send selected novel, comic, or PDF text to Amadeus Companion.",
   "permissions": ["contextMenus", "storage", "tabs", "activeTab"],
   "host_permissions": ["http://127.0.0.1:17878/*"],

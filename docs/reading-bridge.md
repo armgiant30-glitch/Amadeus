@@ -39,20 +39,22 @@ Event fields the store actually reads: `book_id` (required), `kind`, `chapter`,
 
 ## What the shipped client sends
 
-`background.js` builds the event; `content.js` supplies the selection.
+`background.js` builds the event; `content.js` extracts either a selection or one to two chapters.
 
 | Field | Source | Notes |
 |---|---|---|
 | `type` | constant | `reading.selection` |
 | `app` | constant | `browser` |
-| `book_id` | FNV-1a of the page URL | `browser:<hex>`; stable per URL |
-| `chapter` | first `h1`/`h2`/`h3`/`[role=heading]`, else the page title | heuristic |
-| `cursor`, `selected_start`, `selected_end` | character count kept per URL in `chrome.storage.local` | approximate |
+| `book_id` | FNV-1a of a URL-derived book key | Heuristic; query keys such as `book_id`/`novel_id` win, otherwise common book/read path prefixes are kept |
+| `chapter` | meta/heading/title | heuristic |
+| `cursor`, `selected_start`, `selected_end` | current chapter length | automatic chapter mode uses the current chapter boundary |
+| `spoiler_cursor` | current chapter length | next chapter chunks remain future text and are blocked |
 | `page` | omitted when unknown | see the limitation below |
-| `text` | the current selection | required; the client refuses an empty one |
+| `text` | current selection or current chapter body | automatic mode refuses an empty extraction |
+| `chunks` | one chunk per captured chapter | current + next chapter when the next link is fetchable |
 
-Three entry points: context menu on a selection, `Ctrl+Shift+Y`, and the popup
-button.
+Entry points: popup **开始阅读** for one to two chapters, popup **发送当前选中文本**,
+selection context menu, and `Ctrl+Shift+Y` for selected text.
 
 ## Limitations (real, not pending)
 
@@ -65,13 +67,13 @@ button.
    `event.get("page")`, so an absent key is indistinguishable from an explicit
    `null` and `current_page` becomes `None`. The generic client therefore has no
    page number on most sites; a reader-specific client should send a real one.
-3. **The cursor is a character counter, not a position.** It counts characters
-   the extension has sent for that URL. It cannot tell how far into the book the
-   reader actually is, so `SpoilerGuard`'s "before the cursor" boundary is only
-   as good as the client's data.
-4. **`book_id` is per URL.** Two chapters of one book are two ids, and adding a
-   tracking query parameter creates a third. Namespace isolation still works;
-   per-book memory does not.
+3. **The cursor is a chapter/character boundary, not a calibrated book progress.**
+   Automatic mode sets it to the end of the current chapter. It is accurate for
+   the extracted DOM, but not for PDF pages, scrolling, or readers that render
+   only part of the chapter.
+4. **`book_id` is still heuristic.** The client removes common chapter suffixes
+   and recognizes common query parameters, but unusual sites can still split one
+   book or merge two books. Reader-specific adapters can send an exact id.
 5. **PDF and manga pages need their own handling.** The extension captures page
    text selection only; image-only manga pages have no text layer to select.
 
@@ -88,6 +90,7 @@ Invoke-RestMethod http://127.0.0.1:17878/reading/event -Method Post -Body $body 
 Invoke-RestMethod 'http://127.0.0.1:17878/reading/session?book_id=browser:test'
 ```
 
-Then in a browser: load the extension unpacked, select a paragraph, press
-`Ctrl+Shift+Y`, and confirm the third call above shows the chapter, cursor and
-the selected text as a stored chunk.
+Then in a browser: load the extension unpacked, open a chapter, click the
+extension and choose **开始阅读**. Confirm the session shows the current chapter,
+its cursor, and one or two stored chapter chunks. The next chapter is stored as
+future text behind `spoiler_cursor` until you advance.

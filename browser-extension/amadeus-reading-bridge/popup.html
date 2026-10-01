@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <style>
-    body { width: 280px; margin: 0; padding: 14px; font: 13px "Microsoft YaHei UI", sans-serif; background: #071e24; color: #d6f4e9; }
+    body { width: 300px; margin: 0; padding: 14px; font: 13px "Microsoft YaHei UI", sans-serif; background: #071e24; color: #d6f4e9; }
     h1 { margin: 0 0 10px; font-size: 15px; color: #91dfcc; }
     p { margin: 8px 0; color: #9fc3bb; line-height: 1.5; }
-    button { width: 100%; padding: 9px 10px; border: 1px solid #397c73; border-radius: 8px; background: #0d3339; color: #d6f4e9; cursor: pointer; }
+    button { width: 100%; padding: 10px; margin-top: 8px; border: 1px solid #397c73; border-radius: 8px; background: #0d3339; color: #d6f4e9; cursor: pointer; }
     button:hover { background: #12444b; }
+    button.secondary { padding: 7px; color: #9fc3bb; background: transparent; }
     #status { min-height: 34px; margin-top: 10px; color: #b9d9d2; }
     .ok { color: #91dfcc !important; }
     .error { color: #ff9f9f !important; }
@@ -15,10 +16,11 @@
 </head>
 <body>
   <h1>Amadeus Reading Bridge</h1>
-  <p>选中小说、网页或 PDF 文本后发送到 Companion。</p>
-  <button id="send">发送当前选中文本</button>
+  <p>不用选中文字，直接抓取当前章节和下一章（网页允许时）。</p>
+  <button id="start">开始阅读</button>
+  <button id="send" class="secondary">发送当前选中文本</button>
   <div id="status">等待操作</div>
-  <p>快捷键：Ctrl+Shift+Y</p>
+  <p>开始阅读会保存当前章；下一章会作为防剧透的未来文本保存。</p>
   <script src="popup.js"></script>
 </body>
 </html>

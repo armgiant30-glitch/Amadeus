@@ -94,6 +94,63 @@ def test_payload_matches_the_reading_selection_contract():
         assert field in payload_block, f"payload is missing {field}"
 
 
+def test_auto_reading_uses_the_start_entrypoint_and_chunks():
+    background = _client_source("background.js")
+    content = _client_source("content.js")
+    popup = _client_source("popup.html")
+    assert "AMADEUS_START_READING" in background
+    assert "AMADEUS_CAPTURE_READING" in background
+    assert "AMADEUS_CAPTURE_READING" in content
+    assert "spoiler_cursor:" in background
+    assert "chunks" in background
+    assert 'id="start"' in popup
+
+
+def test_auto_reading_payload_keeps_the_next_chapter_behind_the_spoiler_cursor(adapter):
+    store, port = adapter
+    first = "第一章正文。" * 20
+    second = "第二章正文。" * 20
+    payload = {
+        "type": "reading.selection",
+        "app": "browser",
+        "kind": "web",
+        "book_id": "browser:auto-chapters",
+        "chapter": "第一章",
+        "cursor": len(first),
+        "spoiler_cursor": len(first),
+        "selected_start": 0,
+        "selected_end": len(first),
+        "text": first,
+        "chunks": [
+            {
+                "id": "chapter-0-0-" + str(len(first)),
+                "chapter": "第一章",
+                "start_offset": 0,
+                "end_offset": len(first),
+                "text": first,
+                "page": None,
+            },
+            {
+                "id": "chapter-1-" + str(len(first)) + "-" + str(len(first) + len(second)),
+                "chapter": "第二章",
+                "start_offset": len(first),
+                "end_offset": len(first) + len(second),
+                "text": second,
+                "page": None,
+            },
+        ],
+    }
+    status, body = _post(port, "/reading/event", payload)
+    assert status == 200 and body["ok"] is True
+    context = store.get_context("browser:auto-chapters")
+    assert context.cursor == len(first)
+    assert context.spoiler_cursor == len(first)
+    chunks = store.list_chunks("browser:auto-chapters")
+    assert len(chunks) == 2
+    assert chunks[0].chapter == "第一章"
+    assert chunks[1].chapter == "第二章"
+
+
 def test_the_content_script_does_not_report_a_pixel_offset_as_a_page():
     """scrollY is a pixel offset; the old client sent it as a page number."""
     source = _client_source("content.js")

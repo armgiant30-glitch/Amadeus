@@ -1,22 +1,29 @@
 const status = document.getElementById("status");
-const button = document.getElementById("send");
+const startButton = document.getElementById("start");
+const sendButton = document.getElementById("send");
 
 function render(result) {
   if (result?.ok) {
-    status.textContent = `已发送 ${result.chars} 个字符`;
+    const chapters = Number(result.chapters || 0);
+    status.textContent = chapters > 1
+      ? `已读取 ${chapters} 章，共 ${result.chars} 个字符`
+      : `已读取当前章节，共 ${result.chars} 个字符`;
     status.className = "ok";
   } else {
-    status.textContent = result?.error || "发送失败";
+    status.textContent = result?.error || "操作失败";
     status.className = "error";
   }
 }
 
-button.addEventListener("click", async () => {
-  status.textContent = "正在发送…";
+async function run(message, pendingText) {
+  status.textContent = pendingText;
   status.className = "";
-  const result = await chrome.runtime.sendMessage({ type: "AMADEUS_SEND_ACTIVE_SELECTION" });
+  const result = await chrome.runtime.sendMessage({ type: message });
   render(result);
-});
+}
+
+startButton.addEventListener("click", () => run("AMADEUS_START_READING", "正在读取当前章节…"));
+sendButton.addEventListener("click", () => run("AMADEUS_SEND_ACTIVE_SELECTION", "正在发送选中文字…"));
 
 chrome.storage.local.get("lastReadingStatus").then(({ lastReadingStatus }) => {
   if (lastReadingStatus) render(lastReadingStatus);
