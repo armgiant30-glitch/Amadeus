@@ -703,9 +703,9 @@ def schedule_overlay_playback(sentence_id: str, speaking: bool, loop: asyncio.Ab
 
 
 async def publish_overlay_playback(sentence_id: str, speaking: bool) -> None:
-    """Project only real VN audio boundaries, never main-chat speech, to its overlay."""
+    """Project real audio boundaries to the companion or VN overlay."""
     meta = _SENTENCE_META.get(str(sentence_id or ""))
-    if not meta or not meta.get("overlay_url"):
+    if not meta:
         return
     await _publish_overlay(meta, display_text=str(meta.get("display_text") or "") if speaking else "",
                            raw_text="", source="vn_playback", sentence_id=sentence_id, speaking=speaking)
@@ -720,7 +720,7 @@ async def _publish_overlay(
     sentence_id: str = "",
     speaking: bool | None = None,
 ) -> None:
-    url = str((meta or {}).get("overlay_url") or "").strip()
+    url = str((meta or {}).get("overlay_url") or _companion_overlay_url()).strip()
     if not url:
         return
     payload = {
