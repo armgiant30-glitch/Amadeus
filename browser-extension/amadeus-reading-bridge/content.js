@@ -19,6 +19,117 @@ function currentSelection() {
   return text || lastSelection;
 }
 
+function absoluteUrl(value, baseUrl = location.href) {
+  try {
+    const url = new URL(String(value || "").trim(), baseUrl);
+    return /^https?:/i.test(url.href) ? url.href : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function uniqueUrls(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+const wenku8Adapter = {
+  id: "wenku8",
+  contentRoot(root) {
+    return root.querySelector("#content");
+  },
+  extraStripSelectors: "#contentdp, .ad, .ads, .advertisement",
+  isIndexPage(_root, url) {
+    try {
+      return /\/index\.htm(?:[?#]|$)/i.test(new URL(url).pathname);
+    } catch (_) {
+      return false;
+    }
+  },
+  chapterUrls(root, baseUrl) {
+    const urls = [];
+    for (const anchor of root.querySelectorAll("a[href]") || []) {
+      const href = String(anchor.getAttribute("href") || "").trim();
+      if (!href || !/(?:^|\/)\d+\.htm(?:[?#].*)?$/i.test(href)) continue;
+      const label = cleanInline(anchor.textContent || "");
+      if (!label) continue;
+      urls.push(absoluteUrl(href, baseUrl));
+    }
+    return uniqueUrls(urls);
+  },
+  nextChapterUrl(root, baseUrl) {
+    const scripts = [...root.querySelectorAll("script") || []]
+      .map(script => script.textContent || "")
+      .join("\n");
+    const match = scripts.match(/var\s+next_page\s*=\s*["']([^"']+)["']/i);
+    const candidate = match?.[1] ? absoluteUrl(match[1], baseUrl) : "";
+    return candidate && !/\/index\.htm(?:[?#]|$)/i.test(new URL(candidate).pathname)
+      ? candidate
+      : "";
+  },
+  bookKey(url) {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/novel\/([^/]+)\/([^/]+)(?:\/|$)/i);
+    return match ? `${parsed.origin}/novel/${match[1]}/${match[2]}` : "";
+  }
+};
+
+const linovelibAdapter = {
+  id: "linovelib",
+  contentRoot(root) {
+    return root.querySelector("#acontent, #chaptercontent, .read-content, .box_con");
+  },
+  extraStripSelectors: ".ad, .ads, .advertisement, .chapter-nav, .readpage, .read-page",
+  isIndexPage(_root, url) {
+    try {
+      const path = new URL(url).pathname;
+      return /^\/novel\/\d+\.html$/i.test(path) || /^\/novel\/\d+\/?$/i.test(path);
+    } catch (_) {
+      return false;
+    }
+  },
+  chapterUrls(root, baseUrl) {
+    const parsed = new URL(baseUrl);
+    const book = parsed.pathname.match(/^\/novel\/(\d+)/i)?.[1] || "";
+    if (!book) return [];
+    const pattern = new RegExp(`^/novel/${book}/\\d+\\.html$`, "i");
+    const urls = [];
+    for (const anchor of root.querySelectorAll("a[href]") || []) {
+      const href = absoluteUrl(anchor.getAttribute("href"), baseUrl);
+      if (!href) continue;
+      try {
+        if (pattern.test(new URL(href).pathname)) urls.push(href);
+      } catch (_) {
+        // Ignore malformed links.
+      }
+    }
+    return uniqueUrls(urls);
+  },
+  nextChapterUrl(root, baseUrl) {
+    const next = root.querySelector("#next_url, a#next_url, a[rel='next']");
+    return next ? absoluteUrl(next.getAttribute("href"), baseUrl) : "";
+  },
+  bookKey(url) {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/novel\/(\d+)/i);
+    return match ? `${parsed.origin}/novel/${match[1]}` : "";
+  }
+};
+
+function siteAdapterFor(_root = document, url = location.href) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "wenku8.net" || host.endsWith(".wenku8.net") || host.endsWith(".wenku8.com")) {
+      return wenku8Adapter;
+    }
+    if (host === "linovelib.com" || host.endsWith(".linovelib.com")) {
+      return linovelibAdapter;
+    }
+  } catch (_) {
+    // Fall through to the generic adapter.
+  }
+  return null;
+}
+
 function chapterTitle(root = document) {
   const selectors = [
     "meta[property='og:novel:chapter_name']",
@@ -48,6 +159,8 @@ const CONTENT_SELECTORS = [
   ".article-content",
   ".post-content",
   ".entry-content",
+  "#acontent",
+  "#chaptercontent",
   "#chapter-content",
   "#content",
   ".content"
@@ -63,7 +176,10 @@ function textLength(element) {
   return String(element?.textContent || "").replace(/\s+/g, "").length;
 }
 
-function contentRoot(root = document) {
+function contentRoot(root = document, url = location.href) {
+  const adapter = siteAdapterFor(root, url);
+  const preferred = adapter?.contentRoot?.(root);
+  if (preferred) return preferred;
   const candidates = [];
   if (root.body) candidates.push(root.body);
   if (root.nodeType === 1) candidates.push(root);
@@ -85,6 +201,10 @@ function contentRoot(root = document) {
 }
 
 function findNextChapterUrl(root = document, baseUrl = location.href) {
+  const adapter = siteAdapterFor(root, baseUrl);
+  const adapted = adapter?.nextChapterUrl?.(root, baseUrl);
+  if (adapted) return adapted;
+
   const chapterPatterns = [/下一[章篇节]/i, /下章/i, /next\s*chapter/i, /continue\s+reading/i];
   const pagePatterns = [/下一页/i, /next\s*page/i, /^next$/i];
   const chapterLinks = [];
@@ -99,22 +219,20 @@ function findNextChapterUrl(root = document, baseUrl = location.href) {
     else if (pagePatterns.some(pattern => pattern.test(label))) pageLinks.push(anchor);
   }
   for (const element of [...chapterLinks, ...pageLinks]) {
-    const href = element.getAttribute("href");
-    if (!href) continue;
-    try {
-      const url = new URL(href, baseUrl);
-      if (/^https?:/i.test(url.href) && url.href !== baseUrl) return url.href;
-    } catch (_) {
-      // Ignore malformed or javascript links.
-    }
+    const candidate = absoluteUrl(element.getAttribute("href"), baseUrl);
+    if (candidate && candidate !== baseUrl) return candidate;
   }
   return "";
 }
 
 function extractChapter(root = document, url = location.href) {
-  const rootElement = contentRoot(root);
+  const rootElement = contentRoot(root, url);
+  const adapter = siteAdapterFor(root, url);
   const clone = rootElement.cloneNode(true);
-  clone.querySelectorAll?.(STRIP_SELECTORS).forEach(element => element.remove());
+  const selectors = adapter?.extraStripSelectors
+    ? `${STRIP_SELECTORS}, ${adapter.extraStripSelectors}`
+    : STRIP_SELECTORS;
+  clone.querySelectorAll?.(selectors).forEach(element => element.remove());
   const paragraphNodes = clone.querySelectorAll ? [...clone.querySelectorAll("p")] : [];
   const paragraphs = paragraphNodes
     .map(paragraph => cleanInline(paragraph.textContent))
@@ -132,27 +250,46 @@ function extractChapter(root = document, url = location.href) {
 }
 
 function bookKeyForUrl(value) {
-  const url = new URL(value);
+  const parsed = new URL(value);
+  const adapter = siteAdapterFor(document, value);
+  const override = adapter?.bookKey?.(value);
+  if (override) return override;
   for (const key of ["book", "book_id", "bookid", "novel", "novel_id", "novelid", "bid"]) {
-    const item = url.searchParams.get(key);
-    if (item) return `${url.origin}?${key}=${item}`;
+    const item = parsed.searchParams.get(key);
+    if (item) return `${parsed.origin}?${key}=${item}`;
   }
-  const parts = url.pathname.split("/").filter(Boolean);
+  const parts = parsed.pathname.split("/").filter(Boolean);
   const markers = new Set(["book", "novel", "story", "read", "article"]);
   const marker = parts.findIndex(part => markers.has(part.toLowerCase()));
-  if (marker >= 0) return `${url.origin}/${parts.slice(0, marker + 2).join("/")}`;
+  if (marker >= 0) return `${parsed.origin}/${parts.slice(0, marker + 2).join("/")}`;
   if (parts.length >= 2) {
     const last = parts[parts.length - 1];
     if (/\d{1,6}/.test(last) || /chapter|chap|read|page|episode|ep/i.test(last)) {
-      return `${url.origin}/${parts.slice(0, -1).join("/")}`;
+      return `${parsed.origin}/${parts.slice(0, -1).join("/")}`;
     }
   }
-  return `${url.origin}${url.pathname}`;
+  return `${parsed.origin}${parsed.pathname}`;
+}
+
+async function fetchChapter(url) {
+  const response = await fetch(url, { credentials: "include" });
+  if (!response.ok) throw new Error(`章节抓取失败：HTTP ${response.status}`);
+  const html = await response.text();
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  return extractChapter(parsed, url);
 }
 
 async function captureReading(maxChapters = 2) {
   const limit = Math.max(1, Math.min(2, Number(maxChapters) || 2));
-  const first = extractChapter(document, location.href);
+  const adapter = siteAdapterFor(document, location.href);
+  let first;
+  if (adapter?.isIndexPage?.(document, location.href)) {
+    const urls = adapter.chapterUrls?.(document, location.href) || [];
+    if (!urls.length) throw new Error("目录页没有找到章节链接。");
+    first = await fetchChapter(urls[0]);
+  } else {
+    first = extractChapter(document, location.href);
+  }
   if (!first.text || first.text.length < 40) {
     throw new Error("没有识别到正文，请确认当前页是小说、文章或 EPUB 阅读页。");
   }
@@ -162,11 +299,7 @@ async function captureReading(maxChapters = 2) {
     try {
       const target = new URL(nextUrl);
       if (target.origin !== location.origin) break;
-      const response = await fetch(target.href, { credentials: "include" });
-      if (!response.ok) break;
-      const html = await response.text();
-      const parsed = new DOMParser().parseFromString(html, "text/html");
-      const next = extractChapter(parsed, target.href);
+      const next = await fetchChapter(target.href);
       if (!next.text || next.text.length < 40) break;
       chapters.push(next);
       nextUrl = next.next_url;
@@ -211,9 +344,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       url: location.href,
       book_key: bookKeyForUrl(location.href),
       chapter: chapterTitle(document),
-      // No page number here. The old value was window.scrollY, which is a pixel
-      // offset, not a page; the adapter reads page: null as "unknown" and leaves
-      // the stored page alone. A reader-specific client can supply a real one.
       page: null
     });
     return true;

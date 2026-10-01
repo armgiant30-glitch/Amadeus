@@ -56,6 +56,15 @@ Event fields the store actually reads: `book_id` (required), `kind`, `chapter`,
 Entry points: popup **开始阅读** for one to two chapters, popup **发送当前选中文本**,
 selection context menu, and `Ctrl+Shift+Y` for selected text.
 
+## Site adapters
+
+The shipped content script has explicit adapters for:
+
+- `wenku8.net`: directory pages (`index.htm`) and chapter pages (`div#content`, `next_page`)
+- `linovelib.com`: book/chapter pages (`#acontent`, `#next_url`)
+
+Other sites use the generic DOM scoring and next-link heuristics.
+
 ## Limitations (real, not pending)
 
 1. **The adapter has no CORS support.** It sends no `Access-Control-Allow-*`

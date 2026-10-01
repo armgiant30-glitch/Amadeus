@@ -14,6 +14,12 @@ Chrome/Edge extension for sending reading context from web novels, browser PDFs,
 
 ### Start reading automatically
 
+Site adapters currently cover:
+
+- Wenku8 / 轻小说文库: directory and chapter pages
+- Linovelib: book and chapter pages
+- Generic article/novel pages through DOM heuristics
+
 1. Open a chapter or article page.
 2. Click the extension button.
 3. Click **开始阅读**.

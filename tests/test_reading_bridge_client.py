@@ -151,6 +151,16 @@ def test_auto_reading_payload_keeps_the_next_chapter_behind_the_spoiler_cursor(a
     assert chunks[1].chapter == "第二章"
 
 
+def test_known_novel_sites_have_explicit_adapters() -> None:
+    source = _client_source("content.js")
+    assert "wenku8.net" in source
+    assert "linovelib.com" in source
+    assert "next_page" in source
+    assert "#acontent" in source
+    assert "chapterUrls" in source
+    assert "isIndexPage" in source
+
+
 def test_the_content_script_does_not_report_a_pixel_offset_as_a_page():
     """scrollY is a pixel offset; the old client sent it as a page number."""
     source = _client_source("content.js")
