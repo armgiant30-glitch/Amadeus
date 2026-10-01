@@ -175,12 +175,87 @@ store.recall("接下来会不会剧透？")     # -> 0 条
 | 把 `198ef1b`、`846de42` 带进 integration | Codex 或 DSH（需授权） | `integration` 工作树对 DSH 只读，DSH 未改集成分支任何文件 |
 | 整机验收（无壁纸进程、无 Slice/Canvas、无可见主窗口、麦克风/打断） | WorkBuddy / 用户 | 见 `docs/companion-only-startup.md` 的验收步骤 |
 
-## 10. 复现命令
+## 10. 收尾（第二轮任务书）
+
+### 10.1 Work overlay 门禁 — 已完成
+
+`integration` 分支 `4067231`：`createWorkOverlayWindow()` 首行加 `if (COMPANION_ONLY) return`，
+与 Slice/Canvas 的门禁一致。现在 `--work-overlay` 也无法给 companion 启动加一个 Work 面板。
+
+### 10.2 文档更新 — 已完成
+
+`docs/companion-only-startup.md`（同为 `4067231`）新增/修正：
+
+- 新增"Prerequisites for a fresh worktree"：worktree 只有被跟踪文件，需要补两样 gitignored 的东西
+  ——`.env`（模型与语音配置；缺了后端会因 `AMADEUS_BACKEND_AUTH_MODE`/`TOKEN`/`INSTANCE_NONCE`
+  不完整而启动失败）与 `assets/companion/`（可选 Lite 立绘包，缺了卡仍能显示字幕与文字头像）。
+- 后端正常启动时隐藏主窗口、后端启动失败时显示主窗口以暴露错误。
+- `createWorkOverlayWindow()` 加入跳过清单。
+
+### 10.3 真机运行 — 角色卡四项验收已在真实桌面确认
+
+从 `integration` 工作树**真实启动**了集成版 Companion-only 运行时（无 Electron）：
+
+```
+cd worktrees\integration
+$env:AMADEUS_BACKEND_AUTH_MODE='required'; $env:AMADEUS_BACKEND_TOKEN=<32字符>
+$env:AMADEUS_BACKEND_INSTANCE_NONCE=<19字符>; $env:AMADEUS_COMPANION='1'
+python -m server.app --port 17777 --companion
+```
+
+**桌面级观测**（进程 + 窗口枚举 + 按窗口标题截图，不是日志推断）：
+
+| 项目 | 观测 | 判定 |
+|---|---|---|
+| `wallpaper64` / `webwallpaper64` | 进程列表无输出 | ✅ |
+| 可见主窗口 / Slice / Canvas | 有标题的窗口枚举里没有 Amadeus 主窗口 | ✅ |
+| 角色卡置顶显示 | 枚举到 `Amadeus · VN Companion`，`visible=True`，`hwnd=2034916`，进程 `pythonw` pid 145148 | ✅ |
+| 字幕 + 说话状态 | 按 `/reaction` 协议写入后：字幕变成指定文本、表情转微笑、状态从 `STANDBY` 变 `VOICE`、信号条激活 | ✅ |
+| 关闭后无残留 | `card-close` → `{"ok":true}`；20 秒后卡窗口消失、三端口全停、无 `python`/`pythonw` 残留进程 | ✅ |
+
+截图证据（共享工作区）：
+
+- `artifacts\02-companion-card-idle.png` — 待机：立绘、默认字幕、`STANDBY`
+- `artifacts\03-companion-card-speaking.png` — 说话：新字幕、微笑表情、`VOICE`、信号条激活
+
+### 10.4 仍然受限：Electron 二进制在本会话无法启动
+
+`electron.exe` 在本机任何参数下都秒崩，两种崩法都试过：
+
+| 启动方式 | 退出码 | 含义 |
+|---|---|---|
+| `electron.exe --version` | 静默返回 / `0x80000003` | 断点异常 |
+| `electron.exe <最小应用>` | `0x80000003` | 断点异常 |
+| `... --no-sandbox` | `0xC0000005` | 访问违例 |
+| `... --disable-gpu` / `--disable-gpu-sandbox` | `0x80000003` | 断点异常 |
+| `ELECTRON_DISABLE_SANDBOX=1` | `0xC0000005` | 访问违例 |
+
+对照实验很关键：**最小 Electron 应用**（三行 `main.js` + 一个空白 `BrowserWindow`）同样崩，
+所以这与 Amadeus 的启动逻辑无关。另外 `.electron-user-data` 目录在启动尝试后**依然不存在**
+—— Electron 连 `app.setPath('userData', ...)` 都没走到，崩在 JS 主进程之前。
+主仓库与集成分支的两个 Electron 二进制表现一致。
+
+结论：这是**本会话/本机环境**（Chromium 需要自己的沙箱与作业对象，被上层沙箱拦下），
+不是仓库缺陷。因此"Electron 主进程 + 托盘"这条整机链路未验收；但上表四项 GUI 验收
+已用真实运行时的后端 + Tk 卡完成。
+
+### 10.5 另一个环境短板：语音音频链路
+
+`.env` 里 `TTS_BACKEND=fish_audio` 但**没有 `FISH_TTS_API_KEY`**，所以 `tts init failed`，
+`/vn/speak` 虽返回 `queued` 且成功入队三句（`source=vn`），最后停在
+`TTS backend is not initialized; cannot generate speech`。字幕翻译也因远端不可达报
+`Connection error.`。
+
+也就是说：**对话 → 分句 → 入队 → 落到卡的通道**已验证，但**真实音频输出**没验证到，
+因为本环境既没有 TTS 凭据也没有外网。要在真机上听声音，需要 `.env` 里换成可用的
+TTS 后端（本地 GPT-SoVITS 或带 key 的远端）。
+
+## 11. 复现命令
 
 ```powershell
-# 集成契约验证（在 DSH 工作树）
-cd D:\deepseek\111\a\_wt\companion-only
-python tools\verify_companion_integration.py
+# 集成契约验证（在集成分支工作树）
+cd C:\Users\violet\Desktop\Amadeus-Companion-Work\worktrees\integration
+python tools\verify_companion_integration.py     # 30/30
 
 # FTS5 中文分词取证
 python tools\probes\_fts_tokenizer_probe.py
@@ -189,7 +264,10 @@ python tools\probes\_fts_tokenizer_probe.py
 python -m pytest tests\test_companion_only_runtime.py tests\test_companion_card_close.py `
                  tests\test_companion_card_diagnostics.py tests\test_companion_card_live.py -q -s
 
-# Electron 启动模式测试（需先 npm ci）
+# Electron 启动模式测试
 cd electron
 node --experimental-strip-types --test tests\startupMode.test.mjs tests\startupWindowAccess.test.mjs
+
+# 真机 Companion-only（需要桌面会话）
+run_amadeus_companion.bat
 ```
