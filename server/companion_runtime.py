@@ -1,4 +1,4 @@
-"""Companion-only runtime: the portrait card process and its speech surface.
+"""Companion runtime: the portrait card process and its speech surface.
 
 Companion mode reuses the existing repository-owned Tk window
 (``render/vn_overlay_window.py`` via ``tools/vn_portrait_overlay_lite.py``) as the

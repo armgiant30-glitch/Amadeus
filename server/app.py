@@ -321,7 +321,7 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
             "local desktop authentication disabled; direct loopback development mode"
         )
     if companion_only:
-        logger.info("companion-only mode: portrait card, local voice, no Work or AUIP context")
+        logger.info("companion mode: portrait card, local voice, no Work or AUIP context")
         from core.companion import CompanionRuntime
 
         companion_context_runtime = CompanionRuntime(Path(ROOT) / "runtime" / "companion")
@@ -6438,7 +6438,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--companion",
         action="store_true",
-        help="Companion-only session: portrait card and local voice, no wallpaper/Work/AUIP surfaces",
+        help="Companion session: portrait card and local voice, no wallpaper/Work/AUIP surfaces",
     )
     args = parser.parse_args()
     asyncio.run(bootstrap(port=args.port, companion_only=args.companion))

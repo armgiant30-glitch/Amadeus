@@ -1,12 +1,12 @@
 @echo off
-rem Companion-only launch from an ordinary desktop session.
+rem Companion launch from an ordinary desktop session.
 rem
 rem Runs the built Electron main process directly (electron/dist) instead of the
 rem Vite dev server, so it starts faster and has one less moving part.
 rem Do NOT launch this from inside a sandboxed/agent terminal: Electron exits
 rem with 0x80000003 there before its JavaScript starts.
 rem
-rem Companion-only owns no wallpaper host, no Slice, no Canvas and no visible
+rem Companion owns no wallpaper host, no Slice, no Canvas and no visible
 rem main window. The backend starts the repository-owned Tk Companion card and
 rem keeps the existing session, context, ASR/TTS and subtitle contracts.
 
@@ -22,6 +22,10 @@ set VTS_ENABLED=0
 set VTS_HEARTBEAT_ENABLED=0
 set VTS_RECONNECT_ENABLED=0
 set AMADEUS_COMPANION=1
+set AMADEUS_VISION_ENABLED=1
+set AMADEUS_VISION_MODE=on_demand
+set AMADEUS_VISION_SCOPE=read_window
+set AMADEUS_VISION_PROVIDER=qwen
 
 cd /d "%~dp0"
 

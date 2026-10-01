@@ -1,5 +1,5 @@
 @echo off
-rem Companion-only without Electron.
+rem Companion without Electron.
 rem Starts the local backend directly; the backend owns the Tk Companion card.
 setlocal
 chcp 65001 >NUL
@@ -17,11 +17,15 @@ set AEC_REALTIME_ENABLED=0
 set AMADEUS_VISION_ENABLED=1
 set AMADEUS_VISION_MODE=on_demand
 set AMADEUS_VISION_SCOPE=read_window
+set AMADEUS_VISION_PROVIDER=qwen
 set AMADEUS_COMPANION=1
 set TTS_BACKEND=gpt_sovits
 set TTS_DEVICE=cuda
 set TTS_OUTPUT_LANGUAGE=日文
 set TTS_REF_AUDIO_JA=./assets/audio/reference/kurisu_reference.wav
+rem Remote DashScope recognizer. The default is qwen3_asr, which loads the local
+rem Qwen3-ASR model; this launcher must not do that. Conversation backend only.
+set ASR_BACKEND=qwen_remote
 set QWEN3_ASR_DEVICE=cpu
 set MICROPHONE_DEVICE_INDEX=1
 set MICROPHONE_PREFERRED_NAME=
