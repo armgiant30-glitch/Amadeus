@@ -8,5 +8,5 @@
     "sovits_model": "assets/models/gpt-sovits/weights/sovits/v3/yachiyo_e8_s288_l32.pth",
     "gpt_model": ""
   },
-  "persona_file": "assets/characters/yachiyo/persona.txt"
+  "persona_file": "assets/characters/yachiyo/persona-SOUL.md"
 }

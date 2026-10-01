@@ -13,6 +13,7 @@ def test_character_profiles_expose_existing_assets() -> None:
     assert characters["kurisu"]["art_dir"].endswith("assets\\companion\\kurisu")
     assert characters["yachiyo"]["voice_audio"].endswith("yachiyo_reference.wav")
     assert characters["yachiyo"]["voice_sovits_model"].endswith("yachiyo_e8_s288_l32.pth")
+    assert characters["yachiyo"]["persona_file"].endswith("persona-SOUL.md")
 
 
 def test_switching_character_changes_voice_persona_and_art() -> None:
@@ -21,7 +22,7 @@ def test_switching_character_changes_voice_persona_and_art() -> None:
         assert current_character()["id"] == "yachiyo"
         assert active_voice()["audio"].endswith("yachiyo_reference.wav")
         assert active_voice()["sovits_model"].endswith("yachiyo_e8_s288_l32.pth")
-        assert "ルナミヤチヨ" in active_persona()
+        assert "月见八千代" in active_persona()
         assert active_art_dir().endswith("yachiyo-8emotions-companion")
 
         switch_character("kurisu")
