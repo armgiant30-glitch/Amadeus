@@ -63,7 +63,9 @@ def test_the_card_starts_answers_and_leaves_no_process_behind():
             assert status["owned"] is True, status
             assert status["url"] == f"http://127.0.0.1:{PORT}/reaction", status
 
-            assert _get(f"http://127.0.0.1:{PORT}/health").get("status") == "ok"
+            health = _get(f"http://127.0.0.1:{PORT}/health")
+            assert health.get("status") == "ok"
+            assert health.get("companion_controls") is True
 
             _post(f"http://127.0.0.1:{PORT}/reaction", {
                 "source": "vn_playback", "sentence_id": "smoke-1", "speaking": True,

@@ -170,8 +170,16 @@ class PortraitOverlayTk:
                 self.wfile.write(body)
 
             def do_GET(self):
-                self.reply(200 if self.path == "/health" else 404,
-                           {"status": "ok", "application": "amadeus.vn.overlay", "visible": shell.visible})
+                self.reply(
+                    200 if self.path == "/health" else 404,
+                    {
+                        "status": "ok",
+                        "application": "amadeus.vn.overlay",
+                        "visible": shell.visible,
+                        "companion_controls": bool(shell._companion_controls_mode),
+                        "backend_url": str(getattr(shell, "_backend_url", "") or ""),
+                    },
+                )
 
             def do_POST(self):
                 if self.path not in {"/reaction", "/visibility", "/focus"}:

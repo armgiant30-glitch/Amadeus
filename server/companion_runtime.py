@@ -71,14 +71,25 @@ def desktop_credential_environment(environ: Mapping[str, str]) -> dict[str, str]
     return {AUTH_MODE_ENV: mode or "required", AUTH_TOKEN_ENV: token, INSTANCE_NONCE_ENV: nonce}
 
 
-def card_health_ok(health_url: str, timeout: float = CARD_HEALTH_TIMEOUT_S) -> bool:
+def card_health_ok(
+    health_url: str,
+    timeout: float = CARD_HEALTH_TIMEOUT_S,
+    *,
+    require_companion_controls: bool = False,
+    expected_backend_url: str = "",
+) -> bool:
     if not health_url:
         return False
     try:
         with request.urlopen(request.Request(health_url, method="GET"), timeout=timeout) as response:
             if not 200 <= int(response.status) < 300:
                 return False
-            response.read(256)
+            raw = response.read(4096)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        if require_companion_controls and not payload.get("companion_controls"):
+            return False
+        if expected_backend_url and str(payload.get("backend_url") or "") != expected_backend_url:
+            return False
         return True
     except Exception:
         return False
@@ -299,9 +310,14 @@ class CompanionCardHost:
             raise FileNotFoundError(f"Companion card helper not found: {helper}")
         if self._process_alive():
             return self.status()
-        if await asyncio.to_thread(card_health_ok, self.health_url):
-            # A card from a previous launch already owns the port. Adopt the
-            # presentation surface instead of creating a second card.
+        if await asyncio.to_thread(
+            card_health_ok,
+            self.health_url,
+            require_companion_controls=True,
+            expected_backend_url=self.backend_url,
+        ):
+            # A compatible card from a previous launch already owns the port.
+            # Adopt the presentation surface instead of creating a second card.
             self._adopted = True
             self._publish_surface_url()
             return self.status()
@@ -330,7 +346,12 @@ class CompanionCardHost:
                 )
                 self._close_log()
                 raise RuntimeError(message)
-            if await asyncio.to_thread(card_health_ok, self.health_url):
+            if await asyncio.to_thread(
+                card_health_ok,
+                self.health_url,
+                require_companion_controls=True,
+                expected_backend_url=self.backend_url,
+            ):
                 self._visible = True
                 self._publish_surface_url()
                 logger.info(
