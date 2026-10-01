@@ -53,6 +53,28 @@ def test_the_control_shell_uses_the_generic_asr_and_chat_entry_points():
     assert '{"off", "on_question"}' in source
 
 
+def test_an_explicit_vision_request_beats_the_ambient_vision_mode():
+    """The control shell and the runtime use two vocabularies on purpose.
+
+    The shell reports `off | on_question` for the card, while the runtime reads
+    `AMADEUS_VISION_MODE` (`off | on_demand | watching`). They must not fight:
+    when the Companion attaches a screenshot explicitly, the runtime captures it
+    regardless of the ambient mode.
+    """
+    runtime = (ROOT / "server" / "visual_runtime.py").read_text(encoding="utf-8")
+    explicit_gate = runtime.split("enabled = _config.enabled and mode != \"off\"", 1)[1].split("try:", 1)[0]
+    assert "if not enabled and not explicit:" in explicit_gate
+    assert "should_capture = explicit" in explicit_gate
+    # The ambient mode may only add captures, never veto an explicit one.
+    assert explicit_gate.index("should_capture = explicit") < explicit_gate.index('mode == "watching"')
+
+    handler = HANDLER.read_text(encoding="utf-8")
+    assert '"on_question"' in handler
+    assert "AMADEUS_VISION_MODE" not in handler, (
+        "the shell must not read the ambient mode; it only owns its own toggle"
+    )
+
+
 def test_companion_asr_routes_into_the_generic_chat(monkeypatch):
     captured: dict[str, object] = {}
 
