@@ -64,6 +64,7 @@ from core.chat_history_projection import (
     stamp_branch_entries,
     turn_allows_history,
 )
+from core.emotion_hints import infer_emotion_from_text
 from core.chat_stream_consumption import (
     consume_role_stream_text,
     iter_sync_stream as _aiter_sync_iter,
@@ -1978,6 +1979,8 @@ class ChatRuntime:
             emotion = str(attrs.get("preset") or attrs.get("name") or "").strip()
             if emotion:
                 break
+        if not emotion:
+            emotion = infer_emotion_from_text(safe_text)
         try:
             from server.vn_tts_bridge import register_sentence_metadata
 

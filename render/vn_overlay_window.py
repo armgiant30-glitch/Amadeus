@@ -14,6 +14,8 @@ import tkinter as tk
 
 from PIL import Image, ImageColor, ImageDraw, ImageTk
 
+from core.emotion_hints import infer_emotion_from_text
+
 CARD_BG = "#071e24"
 CARD_BORDER = "#397c73"
 CARD_ACCENT = "#91dfcc"
@@ -46,6 +48,8 @@ def infer_emotion(text: str, explicit: str = "") -> tuple[str, int]:
                 duration_ms = max(1000, int(float(match[2]) * 1000))
             except (ValueError, OverflowError):
                 pass
+    if not emotion:
+        emotion = infer_emotion_from_text(text)
     return EMOTION_ALIASES.get(emotion, emotion or "normal"), duration_ms
 
 

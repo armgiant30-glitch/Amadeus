@@ -81,6 +81,9 @@ def register_sentence_metadata(sentence_id: str, metadata: dict[str, Any]) -> No
     clean_id = str(sentence_id or "").strip()
     if clean_id and isinstance(metadata, dict):
         _SENTENCE_META[clean_id] = dict(metadata)
+        emotion = str(metadata.get("emotion") or "").strip()
+        if emotion:
+            logger.info("[Companion emotion] id=%s emotion=%s", clean_id, emotion)
 
 
 def get_vn_sentence_metadata(sentence_id: str) -> dict[str, Any] | None:
