@@ -1982,6 +1982,14 @@ class ChatRuntime:
         if not emotion:
             emotion = infer_emotion_from_text(safe_text)
         try:
+            from core.emotion_hints import has_affection_signal
+
+            if has_affection_signal(str(getattr(st, "question", "") or "")):
+                if emotion in {"sad", "angry", "disappointed"}:
+                    emotion = "blush"
+        except Exception:
+            logger.debug("affection emotion guard unavailable", exc_info=True)
+        try:
             from server.vn_tts_bridge import register_sentence_metadata
 
             register_sentence_metadata(sentence_id, {"emotion": emotion})

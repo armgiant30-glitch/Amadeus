@@ -8,6 +8,13 @@ optional [EMO preset=...] tag.
 from __future__ import annotations
 
 
+_AFFECTION_TERMS: tuple[str, ...] = (
+    "喜欢你", "爱你", "最爱", "心动", "告白", "喜欢你", "喜欢他", "喜欢她", "好喜欢", "很喜欢",
+    "恥ずかしい", "好き", "大好き",
+)
+
+_NEGATIONS: tuple[str, ...] = ("不要", "别", "不用", "不必", "没有", "不是", "并不", "才不")
+
 _HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sided_surprised", ("诶", "欸", "咦", "哇", "真的吗", "不会吧", "没想到", "吓", "吃惊", "まさか", "びっくり", "うそ")),
     ("angry", ("生气", "讨厌", "不许", "笨蛋", "坏蛋", "气死", "别这样", "ムカ", "腹立", "ふざけ", "ばか")),
@@ -19,16 +26,35 @@ _HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def has_affection_signal(text: str) -> bool:
+    value = str(text or "")
+    return any(term in value for term in _AFFECTION_TERMS)
+
+
+def _negated(value: str, word: str) -> bool:
+    index = value.find(word)
+    if index < 0:
+        return False
+    prefix = value[max(0, index - 6):index]
+    return any(negation in prefix for negation in _NEGATIONS)
+
+
 def infer_emotion_from_text(text: str) -> str:
     """Return an atlas emotion key for clear lexical emotion signals."""
 
     value = str(text or "")
     if not value.strip():
         return ""
+    if has_affection_signal(value):
+        return "blush"
     best_key = ""
     best_score = 0
     for key, words in _HINTS:
-        score = sum(value.count(word) for word in words if word)
+        score = sum(
+            value.count(word)
+            for word in words
+            if word and not (key == "sad" and _negated(value, word))
+        )
         if score > best_score:
             best_key, best_score = key, score
     return best_key
