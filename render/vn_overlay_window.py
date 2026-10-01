@@ -90,7 +90,7 @@ class PortraitOverlayTk:
         self._signal_label = self.frame.create_text(77, 211, text="STANDBY", anchor="w", fill="#6d9f96", font=("Consolas", -self._px(9)))
         self.avatar_label = tk.Label(self.frame, bg=CARD_BG, borderwidth=0)
         self.avatar_label.place(x=self._px(23), y=self._px(58), width=self.avatar_size, height=self.avatar_size)
-        self.frame.create_text(177, 65, text="牧瀬 紅莉栖", anchor="w", fill=CARD_ACCENT, font=("Microsoft YaHei UI", -self._px(12), "bold"))
+        self._character_title = self.frame.create_text(177, 65, text="角色", anchor="w", fill=CARD_ACCENT, font=("Microsoft YaHei UI", -self._px(12), "bold"))
         self.frame.scale("all", 0, 0, self._scale, self._scale)
         self.text_var = tk.StringVar(value="准备好了，继续故事吧。")
         caption = tk.Label(self.frame, textvariable=self.text_var, bg=CARD_BG, fg=CARD_TEXT,
@@ -120,6 +120,7 @@ class PortraitOverlayTk:
         self._game_window = None
         self._character_busy = False
         self._character_name = ""
+        self._character_status_requested = False
         self._character_window = None
         self._text_mode = False
         self.text_input_var = tk.StringVar(value="")
@@ -491,6 +492,28 @@ class PortraitOverlayTk:
         tk.Button(window, text="关闭", bg=CARD_BG, fg="#9fc3bb", relief="flat",
                   command=window.destroy).pack(anchor="e", padx=12, pady=(8, 10))
 
+    def _on_character_status(self, result):
+        current = result.get("current") if isinstance(result, dict) else {}
+        name = str((current or {}).get("name") or "").strip()
+        if name:
+            self.root.after(0, lambda value=name: self._set_character_title(value))
+
+    def _set_character_title(self, name):
+        value = str(name or "").strip() or "角色"
+        self._character_name = "" if value == "角色" else value
+        self.frame.itemconfigure(self._character_title, text=value)
+
+    def _ensure_character_status(self):
+        if not self._companion_controls_mode or self._controls is None or self._character_status_requested:
+            return
+        request = getattr(self._controls, "request", None)
+        if callable(request) and request(
+            "companion.character.status",
+            {},
+            callback=self._on_character_status,
+        ):
+            self._character_status_requested = True
+
     def _switch_character(self, character_id):
         if not character_id or not self._controls:
             return
@@ -519,7 +542,7 @@ class PortraitOverlayTk:
             self.text_var.set(f"Character: {error}")
         else:
             name = str(character.get("name") or character.get("id") or "").strip()
-            self._character_name = name
+            self._set_character_title(name)
             art_dir = str(character.get("art_dir") or "").strip()
             reload_pack = getattr(self, "reload_character_pack", None)
             if art_dir and callable(reload_pack):
@@ -695,6 +718,7 @@ class PortraitOverlayTk:
             self._set_emotion(str(payload.get("emotion") or "normal"), "idle" if payload.get("speaking") is False else "speaking")
 
     def _poll(self):
+        self._ensure_character_status()
         while True:
             try:
                 path, payload = self._messages.get_nowait()
