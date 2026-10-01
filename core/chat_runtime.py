@@ -75,6 +75,7 @@ from llm.local_cli import local_llm_query_cli_stream, local_llm_query_cli
 from llm.local_backends import local_chat_url
 from llm.prompts import (
     finalize_system_prompt_language as _finalize_system_prompt_language,
+    get_character_runtime_override as _get_character_runtime_override,
     get_system_prompt as _get_system_prompt,
     wrap_user_message_for_language_lock as _wrap_user_message_for_language_lock,
 )
@@ -852,7 +853,10 @@ def _turn_role_grounding(st: "_TurnState") -> str:
     if getattr(st, "prompt_variant", ""):
         return ""
     reference = str(getattr(st, "character_reference", "") or "")
-    parts: list[str] = [reference] if reference else []
+    character_override = _get_character_runtime_override()
+    parts: list[str] = [character_override] if character_override else []
+    if reference:
+        parts.append(reference)
     try:
         from server.auip_control_decision import render_auip_role_grounding
 

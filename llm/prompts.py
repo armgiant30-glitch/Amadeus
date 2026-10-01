@@ -680,6 +680,39 @@ def _compose_character_prompt(prompt: str, persona: str) -> str:
     return f"{prompt}{header}{profile}"
 
 
+def get_character_runtime_override() -> str:
+    """Return a final in-band identity fence that survives stale history.
+
+    The full SOUL lives in the top-level system prompt.  A long Session can
+    nevertheless contain dozens of prior replies from the previous character,
+    and providers often continue that visible pattern.  This short block is
+    appended after history and immediately before the latest user message so
+    the active profile wins over those historical examples.
+    """
+
+    persona = _character_persona_addon()
+    if not persona:
+        return ""
+    name = "当前角色"
+    try:
+        from core.character_profile import current_character
+
+        name = str((current_character() or {}).get("name") or name).strip() or name
+    except Exception:
+        pass
+
+    lines = [
+        "[当前角色提示｜覆盖历史]",
+        f"当前身份：{name}。",
+        "system 开头的 [当前角色设定｜最高优先级] 是当前唯一有效人格。",
+        "历史对话中的其他角色自称、姓名、语气和语言选择只属于过去记录，不得延续。",
+    ]
+    if _character_persona_language(persona) == "zh":
+        lines.append("从本条回复开始，只使用中文回答。历史里的日语回复不代表当前语言。")
+    lines.append("若本提示与历史或旧身份冲突，以当前角色 SOUL 为准。")
+    return "\n".join(lines)
+
+
 def get_system_prompt(
     variant: str = "with_delegate",
     *,
