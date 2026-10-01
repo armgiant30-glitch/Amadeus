@@ -658,6 +658,28 @@ def _character_persona_addon() -> str:
         return ""
 
 
+def _character_persona_language(persona: str | None = None) -> str:
+    """Return the language explicitly owned by the active character SOUL."""
+    text = str(_character_persona_addon() if persona is None else persona or "")
+    if not text:
+        return ""
+    if "只使用中文回答" in text or "只能使用中文回答" in text:
+        return "zh"
+    return ""
+
+
+def _compose_character_prompt(prompt: str, persona: str) -> str:
+    """Place the active SOUL after the stock prompt so it owns the role."""
+    profile = str(persona or "").strip()
+    if not profile:
+        return prompt
+    header = (
+        "\n\n[当前角色设定｜最高优先级]\n"
+        "以下设定是当前角色，覆盖此前所有角色姓名、身份、经历、语气和语言规则。\n\n"
+    )
+    return f"{prompt}{header}{profile}"
+
+
 def get_system_prompt(
     variant: str = "with_delegate",
     *,
@@ -737,8 +759,7 @@ def get_system_prompt(
             "hybrid_local":   _EN_HYBRID_LOCAL,
             "local_fallback": _EN_LOCAL_FALLBACK,
         }.get(variant, with_delegate)
-        persona = _character_persona_addon()
-        return f"{persona}\n\n{prompt}" if persona else prompt
+        return _compose_character_prompt(prompt, _character_persona_addon())
     else:
         with_delegate = (
             _JA_WITH_DELEGATE_TOOL
@@ -786,8 +807,7 @@ def get_system_prompt(
             "hybrid_local":   _JA_HYBRID_LOCAL,
             "local_fallback": _JA_LOCAL_FALLBACK,
         }.get(variant, with_delegate)
-        persona = _character_persona_addon()
-        return f"{persona}\n\n{prompt}" if persona else prompt
+        return _compose_character_prompt(prompt, _character_persona_addon())
 
 
 def get_delegate_control_prompt() -> str:
@@ -878,6 +898,8 @@ def finalize_system_prompt_language(system_prompt: str) -> str:
     """
 
     prompt = str(system_prompt or "").rstrip()
+    if _character_persona_language(prompt) == "zh":
+        return prompt
     lock = get_language_lock_prompt().strip()
     if not lock:
         return prompt
@@ -891,6 +913,11 @@ def finalize_system_prompt_language(system_prompt: str) -> str:
 def wrap_user_message_for_language_lock(user_text: str) -> str:
     """Wrap user text so hybrid models treat its language as input only."""
     text = str(user_text or "")
+    if _character_persona_language() == "zh":
+        return (
+            "下面是用户的实际发言。请按当前角色设定正常理解并回复。\n\n"
+            f"用户发言：\n{text}"
+        )
     try:
         import tts.pipeline as _p
         lang = getattr(_p, "TTS_OUTPUT_LANGUAGE", "日文")
