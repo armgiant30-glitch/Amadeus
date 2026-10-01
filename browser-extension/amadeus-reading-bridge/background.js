@@ -37,7 +37,9 @@ async function sendSelection(tab, fallbackText = "") {
     app: "browser",
     book_id: bookId,
     chapter: String(captured.chapter || ""),
-    page: Number(captured.page || 0),
+    // Omitted, not zero: the adapter reads a missing/null page as "unknown" and
+    // keeps the stored page, while 0 would claim the reader is on page zero.
+    ...(Number(captured.page) > 0 ? { page: Number(captured.page) } : {}),
     cursor: end,
     selected_start: start,
     selected_end: end,

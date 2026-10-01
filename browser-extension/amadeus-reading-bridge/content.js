@@ -21,7 +21,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     text: currentSelection(),
     url: location.href,
     chapter: readingChapter(),
-    page: Math.max(0, Math.round(window.scrollY || 0))
+    // No page number here. The old value was window.scrollY, which is a pixel
+    // offset, not a page; the adapter reads page: null as "unknown" and leaves
+    // the stored page alone. A reader-specific client can supply a real one.
+    page: null
   });
   return true;
 });
