@@ -78,6 +78,7 @@ def overlay_class(shell=vn_overlay_window):
             # Hold the current pose during the short sentence-end grace period.
             # The next speaking variant can enter directly, without routing through idle.
             settling = self._current_state == "speaking" and self._active_until == 0.0
+            self._lite.set_mouth_value(getattr(self, "_mouth_value", 1.0))
             self._lite.set_paused(not self.root.winfo_viewable() or settling)
             if self._atlas_timer is not None:
                 self.root.after_cancel(self._atlas_timer)

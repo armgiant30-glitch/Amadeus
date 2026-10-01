@@ -29,7 +29,7 @@ class VNOverlayControls:
         auth = LocalAuthPolicy.from_environment(os.environ)
         self._headers = {AUTH_TOKEN_HEADER: auth.token} if auth.required else {}
         self._lock = threading.Lock()
-        self._state = {"connected": False, "inputs": {}, "pending": False, "error": ""}
+        self._state = {"connected": False, "inputs": {}, "pending": False, "error": "", "mouth": 1.0}
         self._commands = queue.Queue(maxsize=1)
         self._stop = threading.Event()
         self._socket = None
@@ -39,6 +39,10 @@ class VNOverlayControls:
     def snapshot(self) -> dict:
         with self._lock:
             return deepcopy(self._state)
+
+    def mouth_value(self) -> float:
+        with self._lock:
+            return float(self._state.get("mouth", 1.0))
 
     def send_text(self, text: str) -> bool:
         value = str(text or "").strip()
@@ -122,6 +126,11 @@ class VNOverlayControls:
                                 self._state.update(connected=True, inputs=params["inputs"])
                                 if not pending_id:
                                     deadline = float("inf")
+                            if message.get("method") == "render.mouth":
+                                try:
+                                    self._state["mouth"] = max(0.0, min(1.0, float(params.get("value") or 0.0)))
+                                except (TypeError, ValueError):
+                                    self._state["mouth"] = 1.0
                             if message.get("type") == "res" and message.get("id") == pending_id:
                                 self._state.update(pending=False, error=str(params.get("error") or ""))
                                 callback = (pending_command or {}).get("callback")

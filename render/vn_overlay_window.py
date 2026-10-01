@@ -127,6 +127,7 @@ class PortraitOverlayTk:
         self._character_status_requested = False
         self._character_window = None
         self._text_mode = False
+        self._mouth_value = 1.0
         self.text_input_var = tk.StringVar(value="")
         self.text_input = (
             tk.Entry(
@@ -723,6 +724,11 @@ class PortraitOverlayTk:
 
     def _poll(self):
         self._ensure_character_status()
+        if self._controls is not None:
+            try:
+                self._mouth_value = self._controls.mouth_value()
+            except Exception:
+                self._mouth_value = 1.0
         while True:
             try:
                 path, payload = self._messages.get_nowait()
