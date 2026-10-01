@@ -113,9 +113,35 @@ class PortraitOverlayTk:
         self._hover_control = ""
         self._hover_timer = None
         self._control_buttons = {}
+        self._companion_controls_mode = bool(companion_controls)
+        self._text_mode = False
+        self.text_input_var = tk.StringVar(value="")
+        self.text_input = (
+            tk.Entry(
+                self.frame,
+                textvariable=self.text_input_var,
+                bg="#0b282d",
+                fg=CARD_TEXT,
+                insertbackground=CARD_ACCENT,
+                selectbackground="#28584f",
+                selectforeground=CARD_TEXT,
+                highlightbackground="#397c73",
+                highlightcolor=CARD_ACCENT,
+                highlightthickness=1,
+                relief="flat",
+                bd=0,
+                font=("Microsoft YaHei UI", -self._px(12)),
+            )
+            if self._companion_controls_mode
+            else None
+        )
+        if self.text_input is not None:
+            self.text_input.bind("<Return>", self._send_text)
+            self.text_input.bind("<Escape>", lambda _event: self._set_text_mode(False))
         self._tooltip = tk.Label(self.frame, bg="#0b282d", fg=CARD_TEXT, font=("Microsoft YaHei UI", -self._px(11)),
                                  wraplength=self._px(258), justify="left", padx=self._px(6), pady=self._px(4), bd=1, relief="solid")
-        for name in ("voice", "vision"):
+        control_names = ("voice", "text", "vision") if self._companion_controls_mode else ("voice", "vision")
+        for name in control_names:
             button = tk.Canvas(self.frame, width=28, height=28, bg=CARD_BG, highlightthickness=0, takefocus=True)
             button.bind("<Button-1>", lambda event, key=name: self._toggle_input(key))
             button.bind("<Return>", lambda event, key=name: self._toggle_input(key))
@@ -208,7 +234,8 @@ class PortraitOverlayTk:
 
     def _layout_caption(self):
         self._layout_timer = None
-        height = max(226, 84 + math.ceil(self._caption.winfo_reqheight() / self._scale) + 36)
+        text_extra = 44 if self._text_mode else 0
+        height = max(226 + text_extra, 84 + math.ceil(self._caption.winfo_reqheight() / self._scale) + 36 + text_extra)
         self.card_height = height
         self.root.geometry(f"{self._px(self.card_width)}x{self._px(height)}")
         # Supersample the original frame at native DPI. Use a binary outside mask:
@@ -239,6 +266,15 @@ class PortraitOverlayTk:
             self._card_photo = ImageTk.PhotoImage(frame, master=self.root)
         self.frame.itemconfigure(self._background_item, image=self._card_photo)
         surface.close()
+        if self.text_input is not None:
+            if self._text_mode:
+                self.text_input.place(
+                    x=self._px(177), y=self._px(height - 44),
+                    width=self._px(266), height=self._px(28),
+                )
+                self.text_input.lift()
+            else:
+                self.text_input.place_forget()
 
     def _scan_tick(self):
         # Decoration stays independent of the shared portrait animation.
@@ -267,7 +303,8 @@ class PortraitOverlayTk:
         self.frame.itemconfigure(self._link_label, state="hidden" if hovered else "normal")
         for index, button in enumerate(self._control_buttons.values()):
             if hovered:
-                button.place(x=self._px(380 + 36 * index), y=self._px(11), width=self._px(28), height=self._px(28))
+                start_x = 452 - 36 * len(self._control_buttons)
+                button.place(x=self._px(start_x + 36 * index), y=self._px(11), width=self._px(28), height=self._px(28))
             else:
                 button.place_forget()
         if not hovered:
@@ -277,6 +314,24 @@ class PortraitOverlayTk:
         state = self._control_state
         inputs = state["inputs"]
         item = inputs.get(name, {})
+        if name == "text":
+            selected = bool(self._text_mode)
+            busy = state["pending"] or item.get("starting", False)
+            enabled = bool(
+                state["connected"]
+                and inputs.get("session_id")
+                and not busy
+                and item.get("available")
+            )
+            detail = "正在发送…" if busy else "已开启" if selected else "已关闭"
+            if not state["connected"]:
+                detail = "未连接"
+            elif not inputs.get("session_id"):
+                detail = "未开始陪玩"
+            elif not item.get("available"):
+                detail = "当前不可用"
+            error_text = state["error"] or item.get("error")
+            return selected, busy, enabled, "键盘输入 · " + detail + (f"\n{error_text}" if error_text else "")
         selected = item.get("enabled", False) if name == "voice" else item.get("mode") == "on_question"
         busy = state["pending"] or item.get("starting", False)
         enabled = bool(state["connected"] and inputs.get("session_id") and not busy and (item.get("available") or selected))
@@ -302,6 +357,11 @@ class PortraitOverlayTk:
                 button.create_arc(8, 9, 20, 21, start=180, extent=180, style="arc", outline=color, width=1.5)
                 button.create_line(14, 21, 14, 24, fill=color, width=1.5)
                 button.create_line(10, 24, 18, 24, fill=color, width=1.5)
+            elif name == "text":
+                button.create_rectangle(5, 9, 23, 22, outline=color, width=1.5)
+                button.create_line(8, 13, 20, 13, fill=color, width=1.5)
+                button.create_line(8, 17, 20, 17, fill=color, width=1.5)
+                button.create_line(10, 21, 18, 21, fill=color, width=1.5)
             else:
                 button.create_rectangle(5, 9, 23, 22, outline=color, width=1.5)
                 button.create_line(9, 9, 11, 6, 17, 6, 19, 9, fill=color, width=1.5)
@@ -326,12 +386,43 @@ class PortraitOverlayTk:
         self._tooltip.place_forget()
 
     def _toggle_input(self, name):
+        if name == "text":
+            self._set_text_mode(not self._text_mode)
+            return "break"
         selected, _, enabled, _ = self._input_view(name)
+        if name == "voice" and not selected and self._text_mode:
+            self._set_text_mode(False, refresh=False)
         if enabled and self._controls:
             changes = {"voice": not selected} if name == "voice" else {"vision_mode": "off" if selected else "on_question"}
             self._controls.set_inputs(self._control_state["inputs"]["session_id"], **changes)
             self._control_state = self._controls.snapshot()
             self._draw_controls()
+        return "break"
+
+    def _set_text_mode(self, enabled, *, refresh=True):
+        if not self._companion_controls_mode:
+            return "break"
+        enabled = bool(enabled)
+        if enabled and self._controls:
+            selected, _, can_stop, _ = self._input_view("voice")
+            if selected and can_stop:
+                self._controls.set_inputs(self._control_state["inputs"]["session_id"], voice=False)
+                self._control_state = self._controls.snapshot()
+        self._text_mode = enabled
+        self._schedule_layout()
+        if enabled and self.text_input is not None:
+            self.root.focus_force()
+            self.text_input.focus_set()
+        if refresh:
+            self._draw_controls()
+        return "break"
+
+    def _send_text(self, _event=None):
+        if not self._text_mode or not self._controls or self.text_input is None:
+            return "break"
+        text = self.text_input_var.get().strip()
+        if text and self._controls.send_text(text):
+            self.text_input_var.set("")
         return "break"
 
     def _drag_start(self, event):

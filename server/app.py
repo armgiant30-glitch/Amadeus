@@ -2629,9 +2629,19 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
         on_ready_to_listen=_handle_asr_ready_to_listen,
         tts_playing_fn=_tts_should_block_mic,
     )
+    async def _send_companion_text(text: str, visual: bool) -> dict:
+        return await chat_h.send_text(
+            text,
+            provider=_current_llm_provider(),
+            session_id=_current_or_create_session_id(),
+            source="companion_text",
+            visual=True if visual else None,
+        )
+
     companion_control_h.configure(
         asr_control=asr_h.handle,
         asr_state=lambda: asr_h.listening_state(include_context=True),
+        chat_send=_send_companion_text,
     )
     wake_h.configure(wake_service_factory=_get_or_create_wake_service)
     vts_h.configure(vts_manager=vts_manager)

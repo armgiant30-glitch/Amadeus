@@ -9,6 +9,7 @@ from server.ws_handler import RequestHandler
 
 
 AsyncCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+ChatSend = Callable[[str, bool], Awaitable[dict[str, Any] | None]]
 
 
 class CompanionControlHandler(RequestHandler):
@@ -17,11 +18,19 @@ class CompanionControlHandler(RequestHandler):
     def __init__(self) -> None:
         self._asr_control: AsyncCall | None = None
         self._asr_state: Callable[[], dict[str, Any]] | None = None
+        self._chat_send: ChatSend | None = None
         self._vision_enabled = False
 
-    def configure(self, *, asr_control: AsyncCall, asr_state: Callable[[], dict[str, Any]]) -> None:
+    def configure(
+        self,
+        *,
+        asr_control: AsyncCall,
+        asr_state: Callable[[], dict[str, Any]],
+        chat_send: ChatSend | None = None,
+    ) -> None:
         self._asr_control = asr_control
         self._asr_state = asr_state
+        self._chat_send = chat_send
 
     @property
     def vision_enabled(self) -> bool:
@@ -31,6 +40,7 @@ class CompanionControlHandler(RequestHandler):
         asr = self._asr_state() if self._asr_state else {}
         listening = bool(asr.get("active") and asr.get("source") == "companion")
         voice_available = self._asr_control is not None
+        text_available = self._chat_send is not None
         return {
             "status": "active",
             "inputs": {
@@ -51,6 +61,12 @@ class CompanionControlHandler(RequestHandler):
                     "error": "",
                     "reason": "ready",
                 },
+                "text": {
+                    "enabled": False,
+                    "available": text_available,
+                    "error": "",
+                    "reason": "ready" if text_available else "chat_unavailable",
+                },
             },
         }
 
@@ -62,8 +78,6 @@ class CompanionControlHandler(RequestHandler):
         return None
 
     async def _set_inputs(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._asr_control is None:
-            raise RuntimeError("ASR is unavailable")
         voice = params.get("voice")
         if voice is not None and not isinstance(voice, bool):
             raise ValueError("Companion voice input must be boolean")
@@ -72,7 +86,21 @@ class CompanionControlHandler(RequestHandler):
             raise ValueError("Unsupported Companion vision mode")
         if vision_mode is not None:
             self._vision_enabled = vision_mode == "on_question"
+        text = params.get("text")
+        if text is not None:
+            if not isinstance(text, str):
+                raise ValueError("Companion text input must be a string")
+            text = text.strip()
+            if not text:
+                raise ValueError("Companion text input must not be empty")
+            if len(text) > 4000:
+                raise ValueError("Companion text input is too long")
+            if self._chat_send is None:
+                raise RuntimeError("Companion chat is unavailable")
+            await self._chat_send(text, self._vision_enabled)
         if voice is not None:
+            if self._asr_control is None:
+                raise RuntimeError("ASR is unavailable")
             if voice:
                 result = await self._asr_control(Method.ASR_START, {
                     "source": "companion",

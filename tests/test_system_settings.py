@@ -136,7 +136,12 @@ def test_settings_only_publish_composed_work_providers() -> None:
 def test_asr_handler_owns_desired_and_loaded_backend() -> None:
     async def run() -> None:
         handler = AsrHandler()
-        assert handler.backend_name in {"qwen3_asr", "sense_voice", "openai_compatible"}
+        assert handler.backend_name in {
+            "qwen3_asr",
+            "qwen_remote",
+            "sense_voice",
+            "openai_compatible",
+        }
 
         await handler.set_backend("sense_voice")
         assert handler.backend_name == "sense_voice"

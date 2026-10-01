@@ -40,6 +40,12 @@ class VNOverlayControls:
         with self._lock:
             return deepcopy(self._state)
 
+    def send_text(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        return self.set_inputs("companion", text=value)
+
     def set_inputs(self, session_id: str, **changes) -> bool:
         with self._lock:
             if not self._state["connected"] or self._state["pending"]:
