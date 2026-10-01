@@ -1460,9 +1460,16 @@ class ChatRuntime:
             _text_only_question = visual_notice_text(question, _visual_context, supported=False)
 
         # ── 视觉 provider 路由：主模型收不了图时，带视觉的轮次整体走专用视觉模型 ──
-        # 判定依据是 server.visual_runtime.provider_availability()（凭据是否齐），
-        # 与桌面端 UI 的闸门同源，避免两边结论不一致。
-        if _visual_context and not provider_supports_direct_image(llm_provider, DEEPSEEK_MODEL_NAME):
+        # AMADEUS_VISION_PROVIDER=qwen 时优先使用 Qwen-VL，即使主模型能直接看图。
+        # 其余情况仍以 server.visual_runtime.provider_availability() 为唯一闸门。
+        _configured_vision_provider = (
+            str(_visual_context.get("provider") or "").strip().lower()
+            if _visual_context else ""
+        )
+        if _visual_context and (
+            _configured_vision_provider in {"qwen", "qwen_vision"}
+            or not provider_supports_direct_image(llm_provider, DEEPSEEK_MODEL_NAME)
+        ):
             try:
                 from server import visual_runtime as _vision_runtime
 
