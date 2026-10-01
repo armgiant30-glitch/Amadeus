@@ -114,6 +114,10 @@ class PortraitOverlayTk:
         self._hover_timer = None
         self._control_buttons = {}
         self._companion_controls_mode = bool(companion_controls)
+        self._game_active = False
+        self._game_busy = False
+        self._game_status_text = ""
+        self._game_window = None
         self._text_mode = False
         self.text_input_var = tk.StringVar(value="")
         self.text_input = (
@@ -140,7 +144,7 @@ class PortraitOverlayTk:
             self.text_input.bind("<Escape>", lambda _event: self._set_text_mode(False))
         self._tooltip = tk.Label(self.frame, bg="#0b282d", fg=CARD_TEXT, font=("Microsoft YaHei UI", -self._px(11)),
                                  wraplength=self._px(258), justify="left", padx=self._px(6), pady=self._px(4), bd=1, relief="solid")
-        control_names = ("voice", "text", "vision") if self._companion_controls_mode else ("voice", "vision")
+        control_names = ("voice", "text", "vision", "game") if self._companion_controls_mode else ("voice", "vision")
         for name in control_names:
             button = tk.Canvas(self.frame, width=28, height=28, bg=CARD_BG, highlightthickness=0, takefocus=True)
             button.bind("<Button-1>", lambda event, key=name: self._toggle_input(key))
@@ -322,6 +326,15 @@ class PortraitOverlayTk:
         state = self._control_state
         inputs = state["inputs"]
         item = inputs.get(name, {})
+        if name == "game":
+            selected = bool(self._game_active)
+            busy = state["pending"] or self._game_busy
+            enabled = bool(state["connected"] and not busy)
+            detail = "正在启动…" if busy else "已连接" if selected else "已停止"
+            if not state["connected"]:
+                detail = "未连接"
+            extra = f"\n{self._game_status_text}" if self._game_status_text else ""
+            return selected, busy, enabled, "Game Companion · " + detail + extra
         if name == "text":
             selected = bool(self._text_mode)
             busy = state["pending"] or item.get("starting", False)
@@ -370,6 +383,12 @@ class PortraitOverlayTk:
                 button.create_line(8, 13, 20, 13, fill=color, width=1.5)
                 button.create_line(8, 17, 20, 17, fill=color, width=1.5)
                 button.create_line(10, 21, 18, 21, fill=color, width=1.5)
+            elif name == "game":
+                button.create_rectangle(5, 8, 23, 22, outline=color, width=1.5)
+                button.create_line(9, 15, 13, 15, fill=color, width=1.5)
+                button.create_line(11, 13, 11, 17, fill=color, width=1.5)
+                button.create_oval(16, 12, 18, 14, outline=color, width=1.5)
+                button.create_oval(19, 15, 21, 17, outline=color, width=1.5)
             else:
                 button.create_rectangle(5, 9, 23, 22, outline=color, width=1.5)
                 button.create_line(9, 9, 11, 6, 17, 6, 19, 9, fill=color, width=1.5)
@@ -394,6 +413,8 @@ class PortraitOverlayTk:
         self._tooltip.place_forget()
 
     def _toggle_input(self, name):
+        if name == "game":
+            return self._toggle_game_companion()
         if name == "text":
             self._set_text_mode(not self._text_mode)
             return "break"
@@ -406,6 +427,110 @@ class PortraitOverlayTk:
             self._control_state = self._controls.snapshot()
             self._draw_controls()
         return "break"
+
+    def _toggle_game_companion(self):
+        if not self._companion_controls_mode or not self._controls:
+            return "break"
+        self._game_busy = True
+        self._draw_controls()
+        self._controls.request("vn.launch.status", {}, callback=self._on_game_status_for_toggle)
+        return "break"
+
+    def _on_game_status_for_toggle(self, result):
+        self.root.after(0, lambda: self._handle_game_status(result, toggle=True))
+
+    def _handle_game_status(self, result, *, toggle=False):
+        if not isinstance(result, dict):
+            result = {}
+        status = str(result.get("status") or "").strip().lower()
+        self._game_active = status in {"active", "starting", "stopping"}
+        self._game_status_text = status or "unknown"
+        self._game_busy = False
+        if toggle:
+            if status in {"active", "starting"}:
+                self._controls.request("vn.launch.stop", {}, callback=self._on_game_command_done)
+            else:
+                self._controls.request("vn.launch.profiles", {}, callback=self._on_game_profiles)
+        self._draw_controls()
+        self._show_control_hint("game")
+
+    def _on_game_profiles(self, result):
+        profiles = result.get("profiles") if isinstance(result, dict) else None
+        self.root.after(0, lambda: self._show_game_profiles(profiles if isinstance(profiles, list) else []))
+
+    def _show_game_profiles(self, profiles):
+        if self._game_window is not None:
+            try:
+                self._game_window.destroy()
+            except Exception:
+                pass
+        window = tk.Toplevel(self.root)
+        self._game_window = window
+        window.title("Game Companion")
+        window.configure(bg=CARD_BG)
+        window.attributes("-topmost", True)
+        window.geometry(f"{self._px(360)}x{self._px(280)}+{self.root.winfo_x()}+{self.root.winfo_y() + self._px(40)}")
+        tk.Label(window, text="选择游戏 profile", bg=CARD_BG, fg=CARD_ACCENT,
+                 font=("Microsoft YaHei UI", -self._px(13), "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        if not profiles:
+            tk.Label(window, text="没有保存的游戏 profile。\n请先在主界面添加 Galgame/VN profile。",
+                     bg=CARD_BG, fg=CARD_TEXT, justify="left",
+                     font=("Microsoft YaHei UI", -self._px(11))).pack(anchor="w", padx=12, pady=8)
+        else:
+            for profile in profiles[:8]:
+                profile_id = str(profile.get("id") or "")
+                label = str(profile.get("name") or profile_id or "Unnamed")
+                state = "可启动" if profile.get("runtimeSupported", True) else "不可用"
+                button = tk.Button(
+                    window,
+                    text=f"{label}  ·  {state}",
+                    bg="#0d3339", fg=CARD_TEXT, activebackground="#12444b",
+                    activeforeground=CARD_TEXT, anchor="w", relief="flat",
+                    font=("Microsoft YaHei UI", -self._px(11)),
+                    command=lambda value=profile_id: self._start_game_profile(value),
+                )
+                button.pack(fill="x", padx=12, pady=3)
+        tk.Button(window, text="关闭", bg="transparent", fg="#9fc3bb", relief="flat",
+                  command=window.destroy).pack(anchor="e", padx=12, pady=(8, 10))
+
+    def _start_game_profile(self, profile_id):
+        if not profile_id or not self._controls:
+            return
+        if self._game_window is not None:
+            try:
+                self._game_window.destroy()
+            except Exception:
+                pass
+            self._game_window = None
+        self._game_busy = True
+        self._game_status_text = "starting"
+        self._draw_controls()
+        self._controls.request(
+            "vn.launch.start",
+            {
+                "profileId": profile_id,
+                "launchOverlay": False,
+                "overlayUrl": "http://127.0.0.1:8788/reaction",
+            },
+            callback=self._on_game_command_done,
+        )
+
+    def _on_game_command_done(self, result):
+        self.root.after(0, lambda: self._handle_game_command_done(result))
+
+    def _handle_game_command_done(self, result):
+        if not isinstance(result, dict):
+            result = {}
+        error = str(result.get("error") or "").strip()
+        status = str(result.get("status") or "").strip()
+        self._game_busy = False
+        self._game_active = status in {"active", "starting", "stopping"}
+        self._game_status_text = error or status or "done"
+        if error:
+            self.text_var.set(f"Game Companion: {error}")
+        else:
+            self.text_var.set(f"Game Companion: {self._game_status_text}")
+        self._draw_controls()
 
     def _set_text_mode(self, enabled, *, refresh=True):
         if not self._companion_controls_mode:
