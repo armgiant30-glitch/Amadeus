@@ -21,7 +21,7 @@ set AMADEUS_VISION_PROVIDER=qwen
 set AMADEUS_COMPANION=1
 set TTS_BACKEND=gpt_sovits
 set TTS_DEVICE=cuda
-set TTS_OUTPUT_LANGUAGE=日文
+set TTS_OUTPUT_LANGUAGE=ja
 set TTS_REF_AUDIO_JA=./assets/audio/reference/kurisu_reference.wav
 rem Remote DashScope recognizer. The default is qwen3_asr, which loads the local
 rem Qwen3-ASR model; this launcher must not do that. Conversation backend only.

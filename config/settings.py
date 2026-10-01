@@ -371,7 +371,20 @@ TTS_GPT_MODEL_PATH, TTS_SOVITS_MODEL_PATH = _resolve_tts_voice_paths(
 
 # 输出语言："日文" | "英文"（对应 dict_language 中的键名）
 # 切换此项即可在日文 LoRA 管线和英文 base 管线之间手动选择
-TTS_OUTPUT_LANGUAGE   = _str("TTS_OUTPUT_LANGUAGE", "日文")
+_tts_output_language_raw = _str("TTS_OUTPUT_LANGUAGE", "日文").strip()
+_TTS_OUTPUT_LANGUAGE_ALIASES = {
+    "ja": "日文",
+    "jp": "日文",
+    "japanese": "日文",
+    "日文": "日文",
+    "en": "英文",
+    "english": "英文",
+    "英文": "英文",
+}
+TTS_OUTPUT_LANGUAGE = _TTS_OUTPUT_LANGUAGE_ALIASES.get(
+    _tts_output_language_raw.lower(),
+    _tts_output_language_raw,
+)
 
 # 日文管线参考音频 / 文本
 TTS_REF_AUDIO_JA = _str("TTS_REF_AUDIO_JA", "./assets/audio/reference/kurisu_reference.wav")

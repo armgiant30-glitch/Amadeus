@@ -18,7 +18,7 @@ env("AMADEUS_VISION_PROVIDER") = "qwen"
 env("AMADEUS_COMPANION") = "1"
 env("TTS_BACKEND") = "gpt_sovits"
 env("TTS_DEVICE") = "cuda"
-env("TTS_OUTPUT_LANGUAGE") = "日文"
+env("TTS_OUTPUT_LANGUAGE") = "ja"
 env("TTS_REF_AUDIO_JA") = "./assets/audio/reference/kurisu_reference.wav"
 ' Remote DashScope recognizer. The default is qwen3_asr, which loads the local
 ' Qwen3-ASR model; this launcher must not do that. Conversation backend only.
