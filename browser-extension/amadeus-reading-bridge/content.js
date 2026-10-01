@@ -334,6 +334,101 @@ async function captureReading(maxChapters = 2) {
   };
 }
 
+function visibleComicImages(limit = 8) {
+  const candidates = [];
+  const viewportHeight = Math.max(1, window.innerHeight);
+  const addImage = (element, source) => {
+    const rect = element.getBoundingClientRect();
+    const naturalWidth = Number(element.naturalWidth || element.width || rect.width || 0);
+    const naturalHeight = Number(element.naturalHeight || element.height || rect.height || 0);
+    if (naturalWidth < 300 && naturalHeight < 300) return;
+    if (rect.bottom < -viewportHeight || rect.top > viewportHeight * 2) return;
+    candidates.push({
+      url: String(source || ""),
+      width: Math.round(naturalWidth || rect.width),
+      height: Math.round(naturalHeight || rect.height),
+      top: rect.top,
+      area: Math.max(naturalWidth || rect.width, naturalHeight || rect.height)
+    });
+  };
+  for (const image of document.images || []) {
+    const source = String(image.currentSrc || image.src || "").trim();
+    if (source) addImage(image, source);
+  }
+  for (const canvas of document.querySelectorAll("canvas") || []) {
+    try {
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.78);
+      const rect = canvas.getBoundingClientRect();
+      if (dataUrl && dataUrl.length > 200) {
+        candidates.push({
+          url: "",
+          data_url: dataUrl,
+          width: canvas.width,
+          height: canvas.height,
+          top: rect.top,
+          area: Math.max(canvas.width, canvas.height)
+        });
+      }
+    } catch (_) {
+      // Cross-origin canvas cannot be exported.
+    }
+  }
+  candidates.sort((a, b) => a.top - b.top || b.area - a.area);
+  return candidates.slice(0, Math.max(1, Math.min(limit, candidates.length)));
+}
+
+async function imageToDataUrl(url) {
+  if (!url) return "";
+  try {
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) return "";
+    const blob = await response.blob();
+    if (!blob.size || blob.size > 12 * 1024 * 1024) return "";
+    return await new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => resolve("");
+      reader.readAsDataURL(blob);
+    });
+  } catch (_) {
+    return "";
+  }
+}
+
+function comicNextUrl(root = document, baseUrl = location.href) {
+  const selectors = ["a[rel='next']", "a.next", ".next a", ".next_page", "#next_url", "a[href*='next']", "a[href*='chapter']"];
+  for (const selector of selectors) {
+    for (const element of root.querySelectorAll(selector) || []) {
+      const candidate = absoluteUrl(element.getAttribute("href"), baseUrl);
+      if (candidate && candidate !== baseUrl) return candidate;
+    }
+  }
+  return "";
+}
+
+async function captureComicChapter(maxPages = 8) {
+  const limit = Math.max(1, Math.min(8, Number(maxPages) || 8));
+  const candidates = visibleComicImages(limit);
+  if (!candidates.length) throw new Error("没有识别到漫画页面图片，请确认当前页是漫画阅读页。");
+  const images = [];
+  for (const item of candidates) {
+    images.push({
+      url: item.url || "",
+      data_url: item.data_url || await imageToDataUrl(item.url),
+      width: item.width,
+      height: item.height
+    });
+  }
+  return {
+    url: location.href,
+    book_key: bookKeyForUrl(location.href),
+    chapter: chapterTitle(document),
+    page: null,
+    images,
+    next_url: comicNextUrl(document, location.href)
+  };
+}
+
 document.addEventListener("mouseup", () => { currentSelection(); });
 document.addEventListener("keyup", () => { currentSelection(); });
 
@@ -350,6 +445,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "AMADEUS_CAPTURE_READING") {
     captureReading(message.maxChapters)
+      .then(result => sendResponse(result))
+      .catch(error => sendResponse({ error: String(error) }));
+    return true;
+  }
+  if (message?.type === "AMADEUS_CAPTURE_COMIC_CHAPTER") {
+    captureComicChapter(message.maxPages)
       .then(result => sendResponse(result))
       .catch(error => sendResponse({ error: String(error) }));
     return true;

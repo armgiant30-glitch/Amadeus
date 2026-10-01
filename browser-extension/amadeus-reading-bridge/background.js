@@ -1,4 +1,5 @@
 const ENDPOINT = "http://127.0.0.1:17878/reading/event";
+const COMIC_ENDPOINT = "http://127.0.0.1:17878/comic/chapter";
 
 function stableBookId(value) {
   let hash = 2166136261;
@@ -108,6 +109,51 @@ async function sendReading(tab) {
   return { ok: true, chars: text.length, chapters: chunks.length || 1 };
 }
 
+async function postComicChapter(payload) {
+  const response = await fetch(COMIC_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`Amadeus comic adapter HTTP ${response.status}`);
+  return response.json().catch(() => ({ ok: true }));
+}
+
+async function sendComic(tab) {
+  const url = tab?.url || "";
+  if (!tab?.id) throw new Error("未找到当前网页。");
+  const captured = await chrome.tabs.sendMessage(tab.id, {
+    type: "AMADEUS_CAPTURE_COMIC_CHAPTER",
+    maxPages: 8
+  });
+  const images = Array.isArray(captured?.images)
+    ? captured.images.filter(item => item && (item.data_url || item.url))
+    : [];
+  if (!images.length) throw new Error("没有识别到漫画页面图片，请确认当前页是漫画阅读页。");
+  const bookId = bookIdForCapture(captured, url);
+  const payload = {
+    type: "comic.chapter",
+    app: "browser",
+    book_id: bookId,
+    chapter: String(captured.chapter || ""),
+    url: String(captured.url || url),
+    page: null,
+    images,
+    next_url: String(captured.next_url || "")
+  };
+  const result = await postComicChapter(payload);
+  await chrome.storage.local.set({
+    lastComicStatus: { ok: true, pages: images.length, bookId, at: Date.now() }
+  });
+  return { ok: true, pages: images.length, summary: String(result?.summary || "") };
+}
+
+async function startComicActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("未找到当前网页。");
+  return await sendComic(tab);
+}
+
 async function sendActiveTab(fallbackText = "") {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new Error("未找到当前网页。");
@@ -132,6 +178,11 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "从当前章节开始阅读",
       contexts: ["page"]
     });
+    chrome.contextMenus.create({
+      id: "amadeus-start-comic",
+      title: "从当前章节开始看漫画",
+      contexts: ["page"]
+    });
   });
 });
 
@@ -141,6 +192,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       await sendSelection(tab, info.selectionText || "");
     } else if (info.menuItemId === "amadeus-start-reading") {
       await sendReading(tab);
+    } else if (info.menuItemId === "amadeus-start-comic") {
+      await sendComic(tab);
     }
   } catch (error) {
     await chrome.storage.local.set({ lastReadingStatus: { ok: false, error: String(error), at: Date.now() } });
@@ -165,6 +218,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "AMADEUS_START_READING") {
     startReadingActiveTab()
+      .then(result => sendResponse(result))
+      .catch(error => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+  if (message?.type === "AMADEUS_START_COMIC") {
+    startComicActiveTab()
       .then(result => sendResponse(result))
       .catch(error => sendResponse({ ok: false, error: String(error) }));
     return true;

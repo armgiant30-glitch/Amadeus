@@ -788,6 +788,124 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
             "capture": capture_summary,
         }
 
+    def _require_companion_scene(request: Request) -> None:
+        if not _http_request_authenticated(request.headers, auth_policy):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _http_request_origin_allowed(request.headers, backend_port=port):
+            raise HTTPException(status_code=403, detail="Untrusted request origin")
+        if companion_context_runtime is None:
+            raise HTTPException(status_code=404, detail="Companion scene context is not part of this launch")
+
+    @app.get("/companion/scene/windows")
+    async def companion_scene_windows(request: Request):
+        _require_companion_scene(request)
+        from server.visual_runtime import list_capture_windows
+
+        return {"ok": True, "windows": list_capture_windows()}
+
+    @app.get("/companion/scene/status")
+    async def companion_scene_status(request: Request):
+        _require_companion_scene(request)
+        assert companion_context_runtime is not None
+        return {"ok": True, "scene": companion_context_runtime.scene_status()}
+
+    @app.post("/companion/scene/bind")
+    async def companion_scene_bind(payload: dict, request: Request):
+        _require_companion_scene(request)
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be an object")
+        kind = str(payload.get("kind") or "").strip().lower()
+        if kind not in {"game", "comic"}:
+            raise HTTPException(status_code=400, detail="kind must be game or comic")
+        from server.visual_runtime import list_capture_windows, set_config
+
+        windows = list_capture_windows()
+        hwnd = str(payload.get("window_handle") or "").strip()
+        title_hint = str(payload.get("title") or "").strip().lower()
+        selected = None
+        if hwnd:
+            selected = next((item for item in windows if str(item.get("hwnd") or "") == hwnd), None)
+        elif title_hint:
+            selected = next(
+                (item for item in windows if title_hint in str(item.get("title") or "").lower()),
+                None,
+            )
+        if selected is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "window not found; pass window_handle or title from /companion/scene/windows", "windows": windows},
+            )
+        assert companion_context_runtime is not None
+        scene = companion_context_runtime.bind_scene(
+            kind,
+            window_handle=str(selected.get("hwnd") or ""),
+            title=str(selected.get("title") or ""),
+            process_name=str(selected.get("processName") or ""),
+        )
+        set_config({"vision_scope": "selected_window", "vision_window_handle": scene.window_handle})
+        return {"ok": True, "scene": companion_context_runtime.scene_status(), "window": selected}
+
+    @app.post("/companion/scene/capture")
+    async def companion_scene_capture(payload: dict, request: Request):
+        _require_companion_scene(request)
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="payload must be an object")
+        assert companion_context_runtime is not None
+        scene = companion_context_runtime.scene_status()
+        if not scene.get("active"):
+            raise HTTPException(status_code=400, detail="no active companion scene; bind a game or comic window first")
+        kind = str(scene.get("kind") or "game")
+        from llm.qwen_client import qwen_vision_describe
+        from server.visual_runtime import capture_visual_context, set_config
+
+        set_config({
+            "vision_scope": "selected_window",
+            "vision_window_handle": str(scene.get("windowHandle") or ""),
+        })
+        captured = await asyncio.to_thread(
+            capture_visual_context,
+            scope="selected_window",
+            reason=f"companion_{kind}",
+        )
+        frame = captured.get("frame") if isinstance(captured.get("frame"), dict) else {}
+        image_base64 = str(frame.get("dataBase64") or "").strip()
+        if not image_base64:
+            return {"ok": True, "status": "capture_failed", "capture": captured}
+        default_prompt = (
+            "你正在看一个游戏画面。请用中文描述当前游戏画面、可见UI、角色、对话/字幕、当前目标和可操作项。"
+            "只描述可见内容，不推测未来剧情。"
+            if kind == "game"
+            else "你正在看一页漫画。请按阅读顺序用中文描述画面、可见对白/气泡文字；如果文字是日文或英文，"
+            "给出原文和中文翻译。只描述本页可见内容，不推测后续页面。"
+        )
+        prompt = str(payload.get("prompt") or "").strip() or default_prompt
+        described = await asyncio.to_thread(qwen_vision_describe, image_base64, prompt=prompt)
+        if not described:
+            return {"ok": True, "status": "describe_failed", "reason": "vision_model_unavailable", "capture": captured}
+        description = str(described.get("description") or "").strip()
+        companion_context_runtime.record_scene_capture(description)
+        capture_summary = {
+            key: captured.get(key)
+            for key in ("scope", "actualScope", "capturedAt", "capture")
+        }
+        return {
+            "ok": True,
+            "status": "ok",
+            "description": description,
+            "capture": capture_summary,
+            "scene": companion_context_runtime.scene_status(),
+        }
+
+    @app.post("/companion/scene/close")
+    async def companion_scene_close(request: Request):
+        _require_companion_scene(request)
+        assert companion_context_runtime is not None
+        companion_context_runtime.close_scene()
+        from server.visual_runtime import set_config
+
+        set_config({"vision_scope": "read_window", "vision_window_handle": ""})
+        return {"ok": True, "scene": companion_context_runtime.scene_status()}
+
     @app.get("/wallpaper/bridge-info")
     async def wallpaper_bridge_info():
         # This is a discovery/health endpoint, not the bridge transport.
@@ -2762,6 +2880,34 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
         asr_control=asr_h.handle, asr_state=lambda: asr_h.listening_state(include_context=True),
         capture_game_view=lambda: vn_launch_h.handle(Method.VN_LAUNCH_CAPTURE, {}),
     )
+
+    def _game_companion_context() -> str:
+        """Render the live VN/Galgame hook as read-only Game Companion context."""
+        try:
+            status = vn_h.status()
+        except Exception:
+            return ""
+        if str(status.get("status") or "") != "active":
+            return ""
+        profile = status.get("profile") if isinstance(status.get("profile"), dict) else {}
+        game_name = str(profile.get("name") or profile.get("game_name") or "").strip()
+        lines = ["<game_companion_context>", f"game={game_name}"]
+        try:
+            activity = vn_h.activity()
+        except Exception:
+            activity = []
+        for item in list(activity)[-8:]:
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            text = str(payload.get("speech") or payload.get("text") or payload.get("display_text") or "").strip()
+            if text:
+                lines.append(f"- {str(item.get('method') or 'vn.event')}: {text[:400]}")
+        lines.append("</game_companion_context>")
+        return "\n".join(lines)
+
+    if companion_context_runtime is not None:
+        companion_context_runtime.set_game_context_provider(_game_companion_context)
     vn_launch_h.configure(
         project_root=Path(ROOT),
         runtime_start=lambda params: vn_h.handle(Method.VN_START, params),

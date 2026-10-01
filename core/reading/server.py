@@ -6,13 +6,14 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
-from typing import Any
+import traceback
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 from .session import ReadingSessionStore
 
 
-_MAX_BODY = 2 * 1024 * 1024
+_MAX_BODY = 32 * 1024 * 1024
 
 
 class ReadingEventServer:
@@ -24,10 +25,12 @@ class ReadingEventServer:
         *,
         host: str = "127.0.0.1",
         port: int = 17878,
+        comic_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("reading adapter must bind to a loopback address")
         self.store = store
+        self.comic_handler = comic_handler
         self.host = host
         self.port = int(port)
         self._server: ThreadingHTTPServer | None = None
@@ -47,6 +50,7 @@ class ReadingEventServer:
         if self._server is not None:
             return self.bound_port
         store = self.store
+        comic_handler = self.comic_handler
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "AmadeusReadingAdapter/1.0"
@@ -100,6 +104,12 @@ class ReadingEventServer:
                         context = store.update_from_event(payload)
                         self._reply(HTTPStatus.OK, {"ok": True, "context": context.to_dict()})
                         return
+                    if target.path == "/comic/chapter":
+                        if comic_handler is None:
+                            raise ValueError("comic chapter handler is unavailable")
+                        result = comic_handler(payload)
+                        self._reply(HTTPStatus.OK, result if isinstance(result, dict) else {"ok": True})
+                        return
                     if target.path == "/reading/turn":
                         book_id = str(payload.get("book_id") or "").strip()
                         if not book_id:
@@ -116,7 +126,8 @@ class ReadingEventServer:
                         )
                         self._reply(HTTPStatus.OK, {"ok": True})
                         return
-                except (ValueError, TypeError, json.JSONDecodeError) as error:
+                except Exception as error:
+                    traceback.print_exc()
                     self._reply(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(error)})
                     return
                 self._reply(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown endpoint"})

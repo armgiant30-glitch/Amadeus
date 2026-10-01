@@ -2,5 +2,6 @@
 
 from .context import CompanionContextBuilder
 from .runtime import CompanionRuntime
+from .scenes import SceneBinding, SceneStore
 
-__all__ = ["CompanionContextBuilder", "CompanionRuntime"]
+__all__ = ["CompanionContextBuilder", "CompanionRuntime", "SceneBinding", "SceneStore"]

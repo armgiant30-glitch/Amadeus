@@ -16,11 +16,13 @@
 </head>
 <body>
   <h1>Amadeus Reading Bridge</h1>
-  <p>不用选中文字，直接抓取当前章节和下一章（网页允许时）。</p>
+  <p>阅读：抓当前章节和下一章（网页允许时）。</p>
+  <p>漫画：抓当前漫画章节页面，交由 Companion 生成章节摘要。</p>
   <button id="start">开始阅读</button>
+  <button id="comic" class="secondary">开始看漫画</button>
   <button id="send" class="secondary">发送当前选中文本</button>
   <div id="status">等待操作</div>
-  <p>开始阅读会保存当前章；下一章会作为防剧透的未来文本保存。</p>
+  <p>开始阅读/开始看漫画都会保存当前内容；下一章只作为防剧透的未来内容保存。</p>
   <script src="popup.js"></script>
 </body>
 </html>
