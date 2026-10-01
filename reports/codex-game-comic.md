@@ -66,3 +66,22 @@ tests/test_companion_scene_robustness.py
 - WorkBuddy：真实漫画章节页“开始看漫画”黑盒验收。
 - Game Companion：真实 Galgame hook 运行时的主 Chat 验收。
 - 速度：如首次仍偏慢，设置更快的 `AMADEUS_COMIC_VL_MODEL`，或先返回本地抓图成功提示。
+
+## Game Companion 卡片入口（138060e）
+
+- 角色卡右上角新增 game 按钮（手柄图标）。
+- 点击逻辑：
+  - 查询 `vn.launch.status`；
+  - active/starting 时调用 `vn.launch.stop`；
+  - idle/error 时读取 `vn.launch.profiles` 并弹出 profile 列表。
+- 选择 profile 后调用 `vn.launch.start`，传 `launchOverlay=false` 和 `overlayUrl=http://127.0.0.1:8788/reaction`，复用现有 Companion 卡片，不再抢 8788。
+- `server/vn_launch_manager.py` 支持 external overlay URL，把 VN runtime 的 overlay_url 指向现有卡片。
+- 控制通道 `VNOverlayControls` 新增通用 request/response callback。
+
+实测：
+
+```text
+vn.launch.profiles -> 0 个（当前机器未保存 VN/Galgame profile）
+vn.launch.status -> idle
+相关测试 -> 38 passed
+```
