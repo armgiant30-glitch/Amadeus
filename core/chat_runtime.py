@@ -1992,7 +1992,13 @@ class ChatRuntime:
         try:
             from server.vn_tts_bridge import register_sentence_metadata
 
-            register_sentence_metadata(sentence_id, {"emotion": emotion})
+            has_kana = any("\u3040" <= char <= "\u30ff" for char in safe_text)
+            has_cjk = any("\u4e00" <= char <= "\u9fff" for char in safe_text)
+            display_text = safe_text if has_cjk and not has_kana else ""
+            register_sentence_metadata(
+                sentence_id,
+                {"emotion": emotion, "display_text": display_text, "display_language": "zh"},
+            )
         except Exception:
             logger.debug("sentence presentation metadata registration unavailable", exc_info=True)
 
