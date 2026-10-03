@@ -15,20 +15,46 @@ _AFFECTION_TERMS: tuple[str, ...] = (
 
 _NEGATIONS: tuple[str, ...] = ("不要", "别", "不用", "不必", "没有", "不是", "并不", "才不")
 
+_INTENSE_SAD_TERMS: tuple[str, ...] = (
+    "绝望", "心碎", "崩溃", "大哭", "哭死", "悲痛", "痛不欲生", "伤心欲绝",
+    "心灰意冷", "撑不住了", "活不下去", "空洞", "空虚",
+)
+_SAD_BASE_TERMS: tuple[str, ...] = ("难过", "伤心", "悲伤", "痛苦", "难受")
+_SAD_INTENSIFIERS: tuple[str, ...] = ("真的", "非常", "特别", "极度", "无比", "太", "很", "好")
+
 _HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("sided_surprised", ("诶", "欸", "咦", "哇", "真的吗", "不会吧", "没想到", "吓", "吃惊", "まさか", "びっくり", "うそ")),
+    ("excited", ("兴奋", "激动", "期待", "好耶", "太棒了", "冲啊", "わくわく", "楽しみ", "やった")),
+    ("shy", ("羞涩", "不好意思", "难为情", "羞耻", "照れ")),
+    ("confused", ("困惑", "不懂", "迷茫", "懵", "疑问", "什么意思", "搞不清", "わからない", "迷う")),
+    ("sleepy", ("困", "累", "想睡", "打哈欠", "疲惫", "睡意", "眠い", "疲れた")),
+    ("smug", ("得意", "骄傲", "自满", "坏笑", "得逞", "臭美", "ドヤ", "得意げ")),
+    ("worried", ("担心", "焦虑", "不安", "害怕", "忧虑", "紧张", "心配")),
+    ("sided_surprised", ("惊讶", "震惊", "没想到", "不会吧", "真的吗", "诶", "欸", "咦", "哇", "吃惊", "まさか", "びっくり", "うそ")),
+    ("surprised", ("正面惊讶", "正面吃惊", "正脸惊讶")),
     ("angry", ("生气", "讨厌", "不许", "笨蛋", "坏蛋", "气死", "别这样", "ムカ", "腹立", "ふざけ", "ばか")),
-    ("blush", ("害羞", "不好意思", "脸红", "喜欢你", "告白", "可爱", "恥ずか", "照れ")),
+    ("blush", ("害羞", "脸红", "喜欢你", "告白", "可爱", "恥ずか", "大好き")),
     ("sad", ("难过", "伤心", "想哭", "呜", "寂寞", "撑不住", "失落", "难受", "抱歉", "对不起", "悲しい", "つらい", "寂しい", "疲れ")),
     ("disappointed", ("失望", "算了", "没办法", "无所谓", "随便", "落寞", "残念", "仕方ない")),
-    ("happy", ("开心", "高兴", "太好了", "哈哈", "嘻嘻", "嘿嘿", "好耶", "真棒", "谢谢", "谢谢", "欢迎", "夸", "沾光", "愉快", "嬉しい", "楽しい", "よかった")),
+    ("happy", ("开心", "高兴", "太好了", "哈哈", "嘻嘻", "嘿嘿", "真棒", "谢谢", "欢迎", "夸", "沾光", "愉快", "嬉しい", "楽しい", "よかった")),
     ("sided_thinking", ("为什么", "怎么", "思考", "想想", "或许", "应该", "说明", "解释", "等一下", "どうして", "なぜ", "考え", "たぶん")),
 )
-
 
 def has_affection_signal(text: str) -> bool:
     value = str(text or "")
     return any(term in value for term in _AFFECTION_TERMS)
+
+
+def _has_intense_sadness(value: str) -> bool:
+    if any(term in value for term in _INTENSE_SAD_TERMS):
+        return True
+    for term in _SAD_BASE_TERMS:
+        index = value.find(term)
+        if index < 0:
+            continue
+        prefix = value[max(0, index - 5):index]
+        if any(prefix.endswith(marker) for marker in _SAD_INTENSIFIERS):
+            return True
+    return False
 
 
 def _negated(value: str, word: str) -> bool:
@@ -47,6 +73,8 @@ def infer_emotion_from_text(text: str) -> str:
         return ""
     if has_affection_signal(value):
         return "blush"
+    if _has_intense_sadness(value):
+        return "disappointed"
     best_key = ""
     best_score = 0
     for key, words in _HINTS:

@@ -2002,6 +2002,14 @@ class ChatRuntime:
         except Exception:
             logger.debug("sentence presentation metadata registration unavailable", exc_info=True)
 
+        if emotion:
+            try:
+                from server.vn_tts_bridge import publish_overlay_preview
+
+                await publish_overlay_preview(emotion, turn_id=st.turn_id)
+            except Exception:
+                logger.debug("overlay emotion preview publish unavailable", exc_info=True)
+
         # 并行启动预翻译，不阻塞 TTS（CLI 本地路径关闭翻译，字幕在播放时显示）
         if translation and _pre_translation_enabled():
             asyncio.create_task(self._safe_start_translation(sentence_id, safe_text))

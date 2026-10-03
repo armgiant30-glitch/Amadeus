@@ -697,6 +697,12 @@ def _get_subtitle_translate_semaphore(loop: asyncio.AbstractEventLoop) -> asynci
 
 async def publish_overlay_subtitle(sentence_id: str, japanese_text: str, chinese_text: str) -> None:
     meta = _SENTENCE_META.get(str(sentence_id or ""), {})
+    logger.info(
+        "[VN subtitle] publish overlay id=%s chars=%d target=%s",
+        sentence_id,
+        len(str(chinese_text or "")),
+        str((meta or {}).get("overlay_url") or _companion_overlay_url() or ""),
+    )
     await _publish_overlay(
         meta,
         display_text=str(chinese_text or "").strip(),
@@ -725,6 +731,29 @@ async def publish_overlay_playback(sentence_id: str, speaking: bool) -> None:
         return
     await _publish_overlay(meta, display_text=str(meta.get("display_text") or "") if speaking else "",
                            raw_text="", source="vn_playback", sentence_id=sentence_id, speaking=speaking)
+
+
+async def publish_overlay_preview(emotion: str, *, turn_id: str = "") -> None:
+    """Project an expression as soon as the first sentence is known.
+
+    This event precedes TTS synthesis and audio playback, so the companion
+    portrait does not wait for the voice queue before reacting.
+    """
+
+    key = str(emotion or "").strip()
+    if not key or key == "normal":
+        return
+    await _publish_overlay(
+        {
+            "emotion": key,
+            "duration_ms": 6500,
+            "line_id": f"preview:{turn_id}" if turn_id else "",
+        },
+        display_text="",
+        raw_text="",
+        source="vn_preview",
+        sentence_id="",
+    )
 
 
 async def _publish_overlay(

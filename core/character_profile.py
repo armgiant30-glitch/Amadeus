@@ -195,3 +195,13 @@ def active_persona() -> str:
 
 def active_art_dir() -> str:
     return store().active_art_dir()
+
+def active_character_id() -> str:
+    profile = store().current()
+    return profile.id if profile is not None else ""
+
+
+def active_memory_namespace() -> str:
+    character_id = active_character_id().strip()
+    return f"character:{character_id}" if character_id else "general"
+

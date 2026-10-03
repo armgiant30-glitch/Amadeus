@@ -23,7 +23,7 @@ def test_switching_character_changes_voice_persona_and_art() -> None:
         assert active_voice()["audio"].endswith("yachiyo_reference.wav")
         assert active_voice()["sovits_model"].endswith("yachiyo_e8_s288_l32.pth")
         assert "月见八千代" in active_persona()
-        assert active_art_dir().endswith("yachiyo-8emotions-companion")
+        assert active_art_dir().endswith("assets\\companion\\yachiyo")
 
         switch_character("kurisu")
         assert current_character()["id"] == "kurisu"

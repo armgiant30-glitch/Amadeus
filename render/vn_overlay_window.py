@@ -27,8 +27,15 @@ EMOTION_ALIASES = {
     "default": "normal", "idle": "normal", "idle1": "normal", "idle2": "normal", "neutral": "normal",
     "thinking": "sided_thinking", "thinking_trans": "sided_thinking",
     "serious_speaking": "sided_thinking", "speaking_trans": "sided_thinking",
-    "surprise": "sided_surprised", "surprise_trans": "sided_surprised", "surprised": "sided_surprised",
-    "smile": "happy", "trans_smile": "happy", "shy": "blush", "shy_trans": "blush",
+    "surprise": "surprised", "surprise_trans": "surprised", "surprised": "surprised",
+    "smile": "happy", "trans_smile": "happy",
+    "shy": "shy", "shy_trans": "shy",
+    "excited": "excited", "excited_trans": "excited",
+    "confused": "confused", "confusion": "confused",
+    "sleepy": "sleepy", "tired": "sleepy",
+    "smug": "smug", "proud": "smug",
+    "worried": "worried", "anxious": "worried",
+    "crying": "sad",
     "angry_trans": "angry", "sad_trans": "sad",
 }
 
@@ -712,13 +719,17 @@ class PortraitOverlayTk:
     def apply_reaction(self, payload):
         sentence = str(payload.get("sentence_id") or "")
         starting = payload.get("source") == "vn_playback" and payload.get("speaking") is True
-        if starting:
+        subtitle = payload.get("source") == "vn_pretranslation"
+        if starting or subtitle:
             self._sentence_id = sentence
         elif sentence and sentence != self._sentence_id:
             return
         caption = clean_display_text(payload.get("display_text")) or clean_display_text(payload.get("text") or payload.get("speak"))
         if caption:
             self.text_var.set(caption)
+        if payload.get("source") == "vn_preview":
+            self._set_emotion(str(payload.get("emotion") or "normal"), "idle")
+            return
         if payload.get("source") != "vn_pretranslation":
             self._set_emotion(str(payload.get("emotion") or "normal"), "idle" if payload.get("speaking") is False else "speaking")
 

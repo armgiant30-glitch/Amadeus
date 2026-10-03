@@ -12,6 +12,18 @@ from PIL import Image, ImageDraw
 from render.companion_pack import BYTE_LIMIT, CompanionPackError, load_companion_pack, validate_clip
 
 
+DEFAULT_EMOTION_FALLBACKS = {
+    "surprised": ("surprised", "sided_surprised", "normal"),
+    "shy": ("shy", "blush", "normal"),
+    "excited": ("excited", "happy", "normal"),
+    "confused": ("confused", "sided_thinking", "normal"),
+    "sleepy": ("sleepy", "normal"),
+    "smug": ("smug", "happy", "normal"),
+    "worried": ("worried", "sad", "normal"),
+    "crying": ("sad", "disappointed", "normal"),
+}
+
+
 class AtlasPlayer:
     """At most two decoded atlases/16 MiB, plus the caller's one displayed tile.
 
@@ -25,6 +37,12 @@ class AtlasPlayer:
         manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
         self.emotions = manifest["emotions"]
         self.mouth_config = manifest.get("mouth") or {}
+        self.aliases = manifest.get("aliases") or {}
+        self.fallbacks = manifest.get("fallbacks") or {}
+        self.mouth_drive = manifest.get("mouthDrive") or {}
+        self.speaking_pool = [str(item) for item in (manifest.get("speakingPool") or []) if str(item)]
+        self._speaking_pool_index = 0
+        self._pending_select = None
         self.clock = clock
         self.entries: OrderedDict[str, Image.Image] = OrderedDict()
         self.resident_bytes = 0
@@ -42,8 +60,46 @@ class AtlasPlayer:
         self.last_tile = None
         self.draws = 0
 
+    def resolve_emotion(self, emotion: str) -> str:
+        key = str(emotion or "").strip().lower()
+        key = str(self.aliases.get(key) or key)
+        if key in self.emotions:
+            return key
+        for candidate in self.fallbacks.get(key, DEFAULT_EMOTION_FALLBACKS.get(key, ())):
+            if candidate in self.emotions:
+                return candidate
+        return "normal" if "normal" in self.emotions else next(iter(self.emotions))
+
+    def request_select(
+        self,
+        emotion: str,
+        speaking: bool,
+        static_idle: bool = False,
+        *,
+        advance_variant: bool = False,
+    ) -> None:
+        key = self.resolve_emotion(emotion)
+        if speaking and self.last_speaking and key != self.last_emotion and self.spec is not None:
+            self._pending_select = (key, speaking, static_idle, advance_variant)
+            return
+        self._pending_select = None
+        self.select(key, speaking, static_idle, advance_variant=advance_variant)
+
+    def choose_speaking_emotion(self, emotion: str, *, advance_variant: bool = False) -> str:
+        requested = self.resolve_emotion(emotion)
+        pool = [self.resolve_emotion(item) for item in self.speaking_pool]
+        pool = [item for item in pool if item in self.emotions]
+        if not pool:
+            return requested
+        if requested in pool:
+            return requested
+        if advance_variant:
+            self._speaking_pool_index = (self._speaking_pool_index + 1) % len(pool)
+        return pool[self._speaking_pool_index]
+
     def select(self, emotion: str, speaking: bool, static_idle: bool = False, *, advance_variant: bool = False):
-        key = emotion if emotion in self.emotions else "normal"
+        self._pending_select = None
+        key = self.resolve_emotion(emotion)
         if speaking and (advance_variant or not self.last_speaking or key != self.last_emotion):
             self.speech_counts[key] = self.speech_counts.get(key, 0) + 1
         self.last_speaking, self.last_emotion = speaking, key
@@ -113,11 +169,35 @@ class AtlasPlayer:
         """Return a changed tile and milliseconds to its next change (None = no timer)."""
         if self.spec is None:
             return None, None
+        if self._pending_select is not None and not self.paused:
+            elapsed_pending = self.elapsed if self.paused else (self.clock() - self.started) * 1000
+            position_pending = (elapsed_pending % self.spec["durationMs"]) / self.spec["durationMs"] * len(self.spec["sequence"])
+            index_pending = math.floor(position_pending)
+            if index_pending >= len(self.spec["sequence"]) - 1:
+                pending = self._pending_select
+                self._pending_select = None
+                emotion, speaking, static_idle, advance_variant = pending
+                self.select(emotion, speaking, static_idle, advance_variant=advance_variant)
         spec = self.spec
         elapsed = self.elapsed if self.paused else (self.clock() - self.started) * 1000
         position = (elapsed % spec["durationMs"]) / spec["durationMs"] * len(spec["sequence"])
         index = math.floor(position)
         tile = spec["sequence"][index]
+        mouth_driven = bool(self.last_speaking and self.mouth_drive)
+        if mouth_driven:
+            threshold = float((self.mouth_spec or {}).get("threshold", 0.08))
+            closed = int(self.mouth_drive.get("closedFrame", 0) or 0)
+            max_open = max(1, int(self.mouth_drive.get("maxOpenFrame", 13) or 13))
+            if self.mouth_value <= threshold:
+                tile = spec["sequence"][closed % len(spec["sequence"])]
+            else:
+                level = max(0.0, min(1.0, (self.mouth_value - threshold) / max(1e-6, 1.0 - threshold)))
+                center = int(round(level * max_open))
+                speed = float(self.mouth_drive.get("speed", 8.0) or 8.0)
+                wobble = float(self.mouth_drive.get("wobble", 1.0) or 0.0)
+                offset = int(round(math.sin((elapsed / 1000.0) * speed * math.tau) * wobble))
+                frame_index = max(1, min(max_open, center + offset))
+                tile = spec["sequence"][frame_index % len(spec["sequence"])]
         image = None
         if tile != self.last_tile:
             size, columns = spec["size"], spec["columns"]
@@ -128,7 +208,11 @@ class AtlasPlayer:
                 image = self._close_mouth(image)
             self.last_tile = tile
             self.draws += 1
-        if self.paused or all(value == tile for value in spec["sequence"]):
+        if self.paused:
+            return image, None
+        if mouth_driven:
+            return image, 40
+        if all(value == tile for value in spec["sequence"]):
             return image, None
         steps = 1
         while steps < len(spec["sequence"]) and spec["sequence"][(index + steps) % len(spec["sequence"])] == tile:
@@ -154,3 +238,4 @@ class AtlasPlayer:
         self.entries.clear()
         self.resident_bytes = 0
         self.spec = None
+        self._pending_select = None

@@ -14,10 +14,33 @@ function bookIdForCapture(captured, fallbackUrl = "") {
   return stableBookId(captured?.book_key || captured?.url || fallbackUrl);
 }
 
+async function sendToContentScript(tabId, message) {
+  if (!tabId) throw new Error("未找到当前网页。");
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (_) {
+    // Extension reload leaves existing tabs without a content-script listener.
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"]
+      });
+    } catch (_) {
+      // Restricted pages or an already-running content script are handled by the retry below.
+    }
+    await new Promise(resolve => setTimeout(resolve, 80));
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (_) {
+      throw new Error("无法连接当前页面，请刷新漫画页后重试，或确认不是 Edge 内部页面。");
+    }
+  }
+}
+
 async function captureSelection(tabId, fallbackUrl = "", fallbackText = "") {
   let captured = { text: fallbackText, url: fallbackUrl, chapter: "", page: null };
   try {
-    const response = await chrome.tabs.sendMessage(tabId, { type: "AMADEUS_CAPTURE_SELECTION" });
+    const response = await sendToContentScript(tabId, { type: "AMADEUS_CAPTURE_SELECTION" });
     if (response?.text) captured = { ...captured, ...response };
   } catch (_) {
     // Restricted browser pages cannot run content scripts; use selectionText if available.
@@ -26,11 +49,16 @@ async function captureSelection(tabId, fallbackUrl = "", fallbackText = "") {
 }
 
 async function postReadingEvent(payload) {
-  const response = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+  let response;
+  try {
+    response = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch (_) {
+    throw new Error("无法连接 Amadeus 后端（17878），请先启动 Companion。");
+  }
   if (!response.ok) throw new Error(`Amadeus adapter HTTP ${response.status}`);
   return response.json().catch(() => ({ ok: true }));
 }
@@ -72,7 +100,7 @@ async function sendSelection(tab, fallbackText = "") {
 async function sendReading(tab) {
   const url = tab?.url || "";
   if (!tab?.id) throw new Error("未找到当前网页。");
-  const captured = await chrome.tabs.sendMessage(tab.id, {
+  const captured = await sendToContentScript(tab.id, {
     type: "AMADEUS_CAPTURE_READING",
     maxChapters: 2
   });
@@ -110,11 +138,16 @@ async function sendReading(tab) {
 }
 
 async function postComicChapter(payload) {
-  const response = await fetch(COMIC_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+  let response;
+  try {
+    response = await fetch(COMIC_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch (_) {
+    throw new Error("无法连接 Amadeus 后端（17878），请先启动 Companion。");
+  }
   if (!response.ok) throw new Error(`Amadeus comic adapter HTTP ${response.status}`);
   return response.json().catch(() => ({ ok: true }));
 }
@@ -122,9 +155,9 @@ async function postComicChapter(payload) {
 async function sendComic(tab) {
   const url = tab?.url || "";
   if (!tab?.id) throw new Error("未找到当前网页。");
-  const captured = await chrome.tabs.sendMessage(tab.id, {
+  const captured = await sendToContentScript(tab.id, {
     type: "AMADEUS_CAPTURE_COMIC_CHAPTER",
-    maxPages: 8
+    maxPages: 40
   });
   const images = Array.isArray(captured?.images)
     ? captured.images.filter(item => item && (item.data_url || item.url))

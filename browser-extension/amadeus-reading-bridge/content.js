@@ -1,3 +1,8 @@
+if (globalThis.__AMADEUS_READING_BRIDGE_LOADED__) {
+  throw new Error("Amadeus Reading Bridge already loaded");
+}
+globalThis.__AMADEUS_READING_BRIDGE_LOADED__ = true;
+
 let lastSelection = "";
 
 function cleanInline(value) {
@@ -334,56 +339,228 @@ async function captureReading(maxChapters = 2) {
   };
 }
 
-function visibleComicImages(limit = 8) {
-  const candidates = [];
-  const viewportHeight = Math.max(1, window.innerHeight);
-  const addImage = (element, source) => {
-    const rect = element.getBoundingClientRect();
-    const naturalWidth = Number(element.naturalWidth || element.width || rect.width || 0);
-    const naturalHeight = Number(element.naturalHeight || element.height || rect.height || 0);
-    if (naturalWidth < 300 && naturalHeight < 300) return;
-    if (rect.bottom < -viewportHeight || rect.top > viewportHeight * 2) return;
-    candidates.push({
-      url: String(source || ""),
-      width: Math.round(naturalWidth || rect.width),
-      height: Math.round(naturalHeight || rect.height),
-      top: rect.top,
-      area: Math.max(naturalWidth || rect.width, naturalHeight || rect.height)
-    });
-  };
-  for (const image of document.images || []) {
-    const source = String(image.currentSrc || image.src || "").trim();
-    if (source) addImage(image, source);
+function comicImageSource(element) {
+  const direct = [
+    element.dataset?.src,
+    element.dataset?.original,
+    element.dataset?.lazySrc,
+    element.dataset?.url,
+    element.dataset?.imagesrc,
+    element.getAttribute("data-src"),
+    element.getAttribute("data-original"),
+    element.getAttribute("data-lazy-src"),
+    element.getAttribute("data-url"),
+    element.getAttribute("data-imagesrc"),
+    element.getAttribute("data-cfsrc"),
+    element.currentSrc,
+    element.src
+  ];
+  for (const candidate of direct) {
+    const value = String(candidate || "").trim();
+    if (!value) continue;
+    // Lazy-loaders commonly leave a 1px GIF/PNG in src before data-src is applied.
+    if (/^data:image\/(?:gif|png);base64,(?:R0lGOD|iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB)/i.test(value)) {
+      continue;
+    }
+    return value;
   }
-  for (const canvas of document.querySelectorAll("canvas") || []) {
+  const srcset = String(element.getAttribute("srcset") || element.dataset?.srcset || "").trim();
+  if (srcset) {
+    const parts = srcset
+      .split(",")
+      .map(part => part.trim().split(/\s+/)[0])
+      .filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  try {
+    const view = element.ownerDocument?.defaultView || window;
+    const background = String(view.getComputedStyle(element).backgroundImage || "");
+    const match = background.match(/url\(["']?(.*?)["']?\)/i);
+    return match?.[1] ? String(match[1]).trim() : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function comicImageCandidate(element, source, order) {
+  const rawSource = String(source || "").trim();
+  if (!rawSource) return null;
+  const baseUrl = element.ownerDocument?.location?.href || location.href;
+  const url = /^(?:data|blob):/i.test(rawSource)
+    ? rawSource
+    : absoluteUrl(rawSource, baseUrl);
+  if (!url) return null;
+  if (/(?:^|[\/._-])(?:logo|icon|avatar|sprite|emoji|button|pixel|spacer|loading|advert|banner)(?:[\/._-]|$)/i.test(url)) {
+    return null;
+  }
+  if (/^data:image\/gif;base64,R0lGOD/i.test(url)) return null;
+  const rect = element.getBoundingClientRect?.() || { top: 0, width: 0, height: 0 };
+  const naturalWidth = Number(
+    element.naturalWidth || element.videoWidth || element.width ||
+    element.getAttribute?.("width") || rect.width || 0
+  );
+  const naturalHeight = Number(
+    element.naturalHeight || element.videoHeight || element.height ||
+    element.getAttribute?.("height") || rect.height || 0
+  );
+  const width = Math.round(naturalWidth || rect.width || 0);
+  const height = Math.round(naturalHeight || rect.height || 0);
+  if (width < 240 && height < 240) return null;
+  return {
+    url,
+    width,
+    height,
+    top: Number(rect.top || 0),
+    order,
+    area: Math.max(width, height)
+  };
+}
+
+function accessibleComicDocuments(root = document) {
+  const documents = [];
+  const seen = new Set();
+  const visit = (candidate) => {
+    if (!candidate || seen.has(candidate)) return;
+    seen.add(candidate);
+    documents.push(candidate);
+    let elements = [];
     try {
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.78);
-      const rect = canvas.getBoundingClientRect();
-      if (dataUrl && dataUrl.length > 200) {
-        candidates.push({
-          url: "",
-          data_url: dataUrl,
-          width: canvas.width,
-          height: canvas.height,
-          top: rect.top,
-          area: Math.max(canvas.width, canvas.height)
-        });
+      elements = candidate.querySelectorAll("*") || [];
+    } catch (_) {
+      return;
+    }
+    for (const element of elements) {
+      if (element.shadowRoot) visit(element.shadowRoot);
+      if (String(element.tagName || "").toUpperCase() === "IFRAME") {
+        try {
+          if (element.contentDocument) visit(element.contentDocument);
+        } catch (_) {
+          // Cross-origin iframe.
+        }
+      }
+    }
+  };
+  visit(root);
+  return documents;
+}
+
+async function collectComicImages(maxPages = 40) {
+  const limit = Math.max(1, Math.min(40, Number(maxPages) || 40));
+  const found = new Map();
+  let order = 0;
+
+  const add = (element, source) => {
+    const candidate = comicImageCandidate(element, source, order++);
+    if (!candidate) return;
+    const existing = found.get(candidate.url);
+    if (!existing || candidate.area > existing.area) found.set(candidate.url, candidate);
+  };
+
+  const scanResources = () => {
+    try {
+      for (const entry of performance.getEntriesByType("resource") || []) {
+        const url = String(entry.name || "").trim();
+        if (!/\.(?:png|jpe?g|webp|avif|gif)(?:[?#]|$)/i.test(url)) continue;
+        if (/(?:^|[\/._-])(?:logo|icon|avatar|sprite|emoji|button|pixel|spacer|loading|advert|banner)(?:[\/._-]|$)/i.test(url)) {
+          continue;
+        }
+        if (entry.initiatorType && entry.initiatorType !== "img" && !/(comic|manga|chapter|page|image|pic|cdn)/i.test(url)) {
+          continue;
+        }
+        if (!found.has(url)) {
+          found.set(url, { url, width: 0, height: 0, top: 0, order: order++, area: 0 });
+        }
       }
     } catch (_) {
-      // Cross-origin canvas cannot be exported.
+      // Resource timing is best-effort.
     }
+  };
+
+  const scan = () => {
+    for (const doc of accessibleComicDocuments()) {
+      for (const image of doc.images || []) {
+        const source = comicImageSource(image);
+        if (source) add(image, source);
+      }
+      for (const sourceElement of doc.querySelectorAll("picture source[srcset]") || []) {
+        const source = comicImageSource(sourceElement);
+        if (source) add(sourceElement, source);
+      }
+      for (const element of doc.querySelectorAll(
+        "[style*='background-image'], [data-src], [data-original], [data-lazy-src], [data-imagesrc]"
+      ) || []) {
+        if (String(element.tagName || "").toUpperCase() === "IMG") continue;
+        const source = comicImageSource(element);
+        if (source) add(element, source);
+      }
+      for (const canvas of doc.querySelectorAll("canvas") || []) {
+        try {
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.78);
+          if (dataUrl && dataUrl.length > 200) add(canvas, dataUrl);
+        } catch (_) {
+          // Cross-origin canvas cannot be exported.
+        }
+      }
+    }
+    scanResources();
+  };
+
+  scan();
+  const originalX = window.scrollX;
+  const originalY = window.scrollY;
+  let totalHeight = Math.max(
+    document.body?.scrollHeight || 0,
+    document.documentElement?.scrollHeight || 0
+  );
+  const step = Math.max(320, Math.floor(window.innerHeight * 0.8));
+  if (found.size < limit && totalHeight > window.innerHeight) {
+    for (let y = 0, steps = 0; y < totalHeight && found.size < limit && steps < 60; y += step, steps++) {
+      window.scrollTo(0, y);
+      await new Promise(resolve => setTimeout(resolve, 140));
+      scan();
+      totalHeight = Math.max(
+        totalHeight,
+        document.body?.scrollHeight || 0,
+        document.documentElement?.scrollHeight || 0
+      );
+    }
+    window.scrollTo(originalX, originalY);
+    await new Promise(resolve => setTimeout(resolve, 60));
   }
-  candidates.sort((a, b) => a.top - b.top || b.area - a.area);
-  return candidates.slice(0, Math.max(1, Math.min(limit, candidates.length)));
+
+  return [...found.values()]
+    .sort((a, b) => a.order - b.order || a.top - b.top || b.area - a.area)
+    .slice(0, limit);
 }
 
 async function imageToDataUrl(url) {
   if (!url) return "";
+  if (String(url).startsWith("data:")) return String(url);
   try {
     const response = await fetch(url, { credentials: "include" });
     if (!response.ok) return "";
     const blob = await response.blob();
     if (!blob.size || blob.size > 12 * 1024 * 1024) return "";
+    try {
+      const bitmap = await createImageBitmap(blob);
+      const scale = Math.min(1, 720 / Math.max(1, bitmap.width));
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (context) {
+        context.fillStyle = "#fff";
+        context.fillRect(0, 0, width, height);
+        context.drawImage(bitmap, 0, 0, width, height);
+        bitmap.close?.();
+        return canvas.toDataURL("image/jpeg", 0.78);
+      }
+      bitmap.close?.();
+    } catch (_) {
+      // Fall back to the original bytes when the browser cannot decode/resize.
+    }
     return await new Promise(resolve => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ""));
@@ -406,19 +583,26 @@ function comicNextUrl(root = document, baseUrl = location.href) {
   return "";
 }
 
-async function captureComicChapter(maxPages = 8) {
-  const limit = Math.max(1, Math.min(8, Number(maxPages) || 8));
-  const candidates = visibleComicImages(limit);
+async function captureComicChapter(maxPages = 40) {
+  const limit = Math.max(1, Math.min(40, Number(maxPages) || 40));
+  const candidates = await collectComicImages(limit);
   if (!candidates.length) throw new Error("没有识别到漫画页面图片，请确认当前页是漫画阅读页。");
   const images = [];
+  let payloadChars = 0;
+  const maxPayloadChars = 48 * 1024 * 1024;
   for (const item of candidates) {
+    const dataUrl = item.data_url || await imageToDataUrl(item.url);
+    if (!dataUrl) continue;
+    if (payloadChars + dataUrl.length > maxPayloadChars) continue;
     images.push({
       url: item.url || "",
-      data_url: item.data_url || await imageToDataUrl(item.url),
+      data_url: dataUrl,
       width: item.width,
       height: item.height
     });
+    payloadChars += dataUrl.length;
   }
+  if (!images.length) throw new Error("漫画图片读取失败，请检查图片是否需要登录或跨域权限。");
   return {
     url: location.href,
     book_key: bookKeyForUrl(location.href),

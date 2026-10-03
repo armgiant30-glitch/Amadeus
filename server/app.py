@@ -1049,9 +1049,7 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
                 checker = getattr(playback_manager, "is_current_playback_sentence", None)
                 if callable(checker):
                     is_current_sentence = bool(checker(sentence_id))
-            if (is_vn_sentence and not is_current_sentence) or (
-                not is_vn_sentence and current_id and not is_current_sentence
-            ):
+            if is_vn_sentence and not is_current_sentence:
                 logger.info(
                     "skip subtitle update for stale sentence: playing=%s incoming=%s",
                     current_id,
@@ -1060,6 +1058,12 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
                 return
         except Exception:
             logger.debug("subtitle current sentence guard failed", exc_info=True)
+        logger.info(
+            "display chinese subtitle sentence=%s chars=%d text=%r",
+            sentence_id,
+            len(str(chinese_text or "")),
+            str(chinese_text or "")[:80],
+        )
         if is_vn_sentence:
             _update_wallpaper_subtitle(japanese_text, chinese_text)
             try:
@@ -1090,7 +1094,8 @@ async def bootstrap(port: int = 17777, companion_only: bool = False) -> None:
             try:
                 from server.vn_tts_bridge import display_vn_subtitle, is_vn_sentence
 
-                if is_vn_sentence(sentence_id):
+                companion_mode = os.environ.get("AMADEUS_COMPANION", "").strip().lower() in {"1", "true", "yes", "on"}
+                if is_vn_sentence(sentence_id) and not companion_mode:
                     asyncio.create_task(display_vn_subtitle(
                         sentence_id, japanese_text,
                         display=_server_display_chinese_subtitle_with_text,
@@ -3095,15 +3100,20 @@ async def _stream_llm_query_adapter(
 
     extra_context = ""
     book_id = ""
+    prior_user_messages: list[str] = []
+    if history_snapshot is not None:
+        for message in getattr(history_snapshot, "dialog", ()) or ():
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = str(message.get("content") or "").strip()
+            if content:
+                prior_user_messages.append(content)
     if companion_context_runtime is not None:
-        latest_context = companion_context_runtime.reading.latest_context()
-        book_id = latest_context.book_id if latest_context is not None else ""
-        chunks = companion_context_runtime.reading.list_chunks(book_id) if book_id else ()
         try:
+            book_id = companion_context_runtime.active_reading_book_id()
             extra_context = companion_context_runtime.context_block(
                 text,
-                book_id=book_id or None,
-                chunks=chunks,
+                prior_user_messages=prior_user_messages,
             )
         except Exception as error:
             logger.debug("[companion] context assembly unavailable: %s", error)

@@ -61,7 +61,7 @@ def test_manifest_grants_only_the_adapter_origin_and_the_send_entry_points():
     manifest = json.loads(_client_source("manifest.json"))
     assert manifest["manifest_version"] == 3
     assert manifest["host_permissions"] == [f"http://127.0.0.1:{ADAPTER_PORT}/*"]
-    assert set(manifest["permissions"]) == {"contextMenus", "storage", "tabs", "activeTab"}
+    assert set(manifest["permissions"]) == {"contextMenus", "storage", "tabs", "activeTab", "scripting"}
     # Three ways in: context menu, keyboard shortcut, popup button.
     assert "contextMenus" in manifest["permissions"]
     assert manifest["commands"]["send-selection"]["suggested_key"]["default"] == "Ctrl+Shift+Y"
@@ -104,6 +104,23 @@ def test_auto_reading_uses_the_start_entrypoint_and_chunks():
     assert "spoiler_cursor:" in background
     assert "chunks" in background
     assert 'id="start"' in popup
+
+
+def test_content_script_is_reinjected_when_an_old_tab_has_no_receiver():
+    background = _client_source("background.js")
+    assert "chrome.scripting.executeScript" in background
+    assert 'files: ["content.js"]' in background
+    assert "sendToContentScript" in background
+
+
+def test_comic_capture_scans_the_whole_chapter_and_lazy_images():
+    content = _client_source("content.js")
+    background = _client_source("background.js")
+    assert "async function collectComicImages(maxPages = 40)" in content
+    assert "window.scrollTo" in content
+    assert "data-src" in content
+    assert "maxPages: 40" in background
+    assert "visibleComicImages" not in content
 
 
 def test_auto_reading_payload_keeps_the_next_chapter_behind_the_spoiler_cursor(adapter):

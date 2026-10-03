@@ -19,6 +19,8 @@ limitations that are real rather than pending work.
 | `GET` | `/health` | — | `{"ok": true}` |
 | `GET` | `/reading/session` | `?book_id=<id>` | `{"ok": true, "context": {...}}`, `404` when unknown |
 | `POST` | `/reading/event` | a `reading.selection` event | `{"ok": true, "context": {...}}`, `400` on bad input |
+| `POST` | `/comic/chapter` | `book_id`, `chapter`, `images[]`, `next_url` | `{"ok": true, "summary": "..."}` |
+| `POST` | `/zotero/sync` | `item_key` and optional selected/translated text | `{"ok": true, "book_id": "...", "chars": N}` |
 | `POST` | `/reading/turn` | `book_id`, `user_message`, `assistant_message`, `selected_excerpt`, `referenced_chunks` | `{"ok": true}` |
 
 Event fields the store actually reads: `book_id` (required), `kind`, `chapter`,
@@ -55,6 +57,35 @@ Event fields the store actually reads: `book_id` (required), `kind`, `chapter`,
 
 Entry points: popup **开始阅读** for one to two chapters, popup **发送当前选中文本**,
 selection context menu, and `Ctrl+Shift+Y` for selected text.
+
+Comic capture scans the whole chapter DOM, scrolls through the page to trigger lazy
+images, follows common `src`/`data-src`/`srcset` variants, and sends up to 40
+downscaled pages. The backend tiles them into one reading-order contact sheet for
+the chapter summary.
+
+## Active source contract
+
+Companion keeps source slots separately in
+`runtime/companion/active_reading.json` and uses one focus pointer:
+
+- `zotero` keeps the latest Zotero paper/translation session;
+- `web` keeps the latest browser/novel/EPUB reading session;
+- `comic` keeps the latest comic book, chapter title and scene summary;
+- `game` remains a separate scene lane and is not part of the three-source split;
+- `focus` points to the slot chat should read now.
+
+Every successful source-changing request updates its own slot and moves focus:
+
+- `/reading/event` updates `web` for browser/novel/EPUB and focuses it;
+- `/zotero/sync` updates `zotero` with `zotero:<item-key>` and focuses it;
+- `/comic/chapter` updates `comic` and focuses it;
+- binding a game or comic window updates that scene slot and focuses it.
+
+Switching therefore preserves the other side's last state. The chat adapter
+reads the focused slot only; it does not use `latest_context()`. Zotero/web/
+novel slots feed the reading-context block; game/comic slots feed the scene
+block and suppress stale reading context. An old install is migrated by seeding
+each missing slot, without overwriting the saved focus.
 
 ## Site adapters
 
@@ -103,3 +134,21 @@ Then in a browser: load the extension unpacked, open a chapter, click the
 extension and choose **开始阅读**. Confirm the session shows the current chapter,
 its cursor, and one or two stored chapter chunks. The next chapter is stored as
 future text behind `spoiler_cursor` until you advance.
+
+
+## Zotero full-text retention
+
+The backend keeps Zotero full text for 6 hours by default. After that window, it:
+
+1. generates a concise Chinese reading report from the stored chunks;
+2. asks the summary model for a short `Companion 补充`;
+3. writes `runtime/companion/reading/reports/<book-id>.md`;
+4. replaces the detailed chunks with one `reading-summary` chunk.
+
+If summarization fails, the detailed chunks are kept for a later retry.
+Only `kind=zotero` sessions are compacted by default.
+
+Configuration:
+
+- `AMADEUS_READING_RETENTION_ENABLED=1`
+- `AMADEUS_READING_FULLTEXT_TTL_HOURS=6`

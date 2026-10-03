@@ -118,3 +118,63 @@ def test_update_from_event_persists_selected_text_chunk(tmp_path: Path) -> None:
     assert len(chunks) == 1
     assert chunks[0].text == "这是用户选中的一两章内容。"
     assert chunks[0].end_offset == 1200
+
+
+def test_compact_expired_replaces_fulltext_with_reading_report(tmp_path: Path) -> None:
+    store = ReadingSessionStore.open(tmp_path)
+    store.save_context(
+        ReadingContext(
+            book_id="zotero:paper-1",
+            kind="zotero",
+            current_chapter="Paper Title",
+            cursor=120,
+            spoiler_cursor=120,
+        )
+    )
+    store.save_chunks(
+        "zotero:paper-1",
+        [
+            ReadingChunk("c1", "Paper Title", 0, 60, "第一段论文内容"),
+            ReadingChunk("c2", "Paper Title", 60, 120, "第二段论文内容"),
+        ],
+    )
+
+    result = store.compact_expired(
+        older_than_hours=0,
+        summarizer=lambda context, chunks: "核心结论：测试通过。\n\nCompanion 补充：值得记住。",
+    )
+
+    assert len(result) == 1
+    report = Path(str(result[0]["report"]))
+    assert report.is_file()
+    assert "Companion 补充" in report.read_text(encoding="utf-8")
+    chunks = store.list_chunks("zotero:paper-1")
+    assert len(chunks) == 1
+    assert chunks[0].id == "reading-summary"
+    assert "核心结论" in chunks[0].text
+
+
+def test_compact_expired_failure_keeps_fulltext(tmp_path: Path) -> None:
+    store = ReadingSessionStore.open(tmp_path)
+    store.save_context(ReadingContext(book_id="zotero:paper-2", kind="zotero"))
+    store.save_chunks(
+        "zotero:paper-2",
+        [ReadingChunk("c1", "Paper", 0, 20, "原文内容")],
+    )
+
+    def fail(_context, _chunks):
+        raise RuntimeError("model unavailable")
+
+    result = store.compact_expired(older_than_hours=0, summarizer=fail)
+    assert result == []
+    assert [chunk.id for chunk in store.list_chunks("zotero:paper-2")] == ["c1"]
+
+
+def test_compact_expired_ignores_non_zotero_chunks(tmp_path: Path) -> None:
+    store = ReadingSessionStore.open(tmp_path)
+    store.save_context(ReadingContext(book_id="book-1", kind="novel"))
+    store.save_chunks("book-1", [ReadingChunk("c1", "第一章", 0, 10, "小说内容")])
+
+    result = store.compact_expired(older_than_hours=0, summarizer=lambda *_: "summary")
+    assert result == []
+    assert [chunk.id for chunk in store.list_chunks("book-1")] == ["c1"]

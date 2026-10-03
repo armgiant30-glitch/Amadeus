@@ -10,10 +10,12 @@ import traceback
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
+from .models import ReadingContext
 from .session import ReadingSessionStore
+from .zotero import ZoteroError, ZoteroLocalClient, ZoteroUnavailable
 
 
-_MAX_BODY = 32 * 1024 * 1024
+_MAX_BODY = 64 * 1024 * 1024
 
 
 class ReadingEventServer:
@@ -26,11 +28,15 @@ class ReadingEventServer:
         host: str = "127.0.0.1",
         port: int = 17878,
         comic_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        zotero_client: ZoteroLocalClient | None = None,
+        on_context_changed: Callable[[ReadingContext], None] | None = None,
     ):
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("reading adapter must bind to a loopback address")
         self.store = store
         self.comic_handler = comic_handler
+        self.zotero = zotero_client or ZoteroLocalClient()
+        self.on_context_changed = on_context_changed
         self.host = host
         self.port = int(port)
         self._server: ThreadingHTTPServer | None = None
@@ -51,6 +57,8 @@ class ReadingEventServer:
             return self.bound_port
         store = self.store
         comic_handler = self.comic_handler
+        zotero = self.zotero
+        on_context_changed = self.on_context_changed
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "AmadeusReadingAdapter/1.0"
@@ -94,6 +102,24 @@ class ReadingEventServer:
                         return
                     self._reply(HTTPStatus.OK, {"ok": True, "context": context.to_dict()})
                     return
+                if target.path == "/zotero/status":
+                    self._reply(HTTPStatus.OK, zotero.status())
+                    return
+                if target.path == "/zotero/items":
+                    params = parse_qs(target.query)
+                    query = str(params.get("q", [""])[0]).strip()
+                    item_type = str(params.get("item_type", [""])[0]).strip()
+                    try:
+                        limit = int(params.get("limit", ["50"])[0])
+                        items = zotero.list_items(query=query, item_type=item_type, limit=limit)
+                    except ZoteroUnavailable as error:
+                        self._reply(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(error)})
+                        return
+                    except (ValueError, ZoteroError) as error:
+                        self._reply(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(error)})
+                        return
+                    self._reply(HTTPStatus.OK, {"ok": True, "items": items})
+                    return
                 self._reply(HTTPStatus.NOT_FOUND, {"ok": False, "error": "unknown endpoint"})
 
             def do_POST(self) -> None:
@@ -102,6 +128,8 @@ class ReadingEventServer:
                     payload = self._json_body()
                     if target.path == "/reading/event":
                         context = store.update_from_event(payload)
+                        if on_context_changed is not None:
+                            on_context_changed(context)
                         self._reply(HTTPStatus.OK, {"ok": True, "context": context.to_dict()})
                         return
                     if target.path == "/comic/chapter":
@@ -109,6 +137,23 @@ class ReadingEventServer:
                             raise ValueError("comic chapter handler is unavailable")
                         result = comic_handler(payload)
                         self._reply(HTTPStatus.OK, result if isinstance(result, dict) else {"ok": True})
+                        return
+                    if target.path == "/zotero/sync":
+                        item_key = str(payload.get("item_key") or payload.get("key") or "").strip()
+                        if not item_key:
+                            raise ValueError("item_key is required")
+                        result = zotero.sync_item(
+                            store,
+                            item_key,
+                            selected_text=str(payload.get("translated_text") or payload.get("translation") or payload.get("translation_text") or payload.get("translated") or payload.get("subtitle_text") or payload.get("display_text") or payload.get("selected_text") or payload.get("text") or ""),
+                            max_chars=int(payload.get("max_chars") or 40000),
+                        )
+                        if on_context_changed is not None:
+                            book_id = str(result.get("book_id") or "").strip()
+                            context = store.get_context(book_id) if book_id else None
+                            if context is not None:
+                                on_context_changed(context)
+                        self._reply(HTTPStatus.OK, result)
                         return
                     if target.path == "/reading/turn":
                         book_id = str(payload.get("book_id") or "").strip()
@@ -126,6 +171,9 @@ class ReadingEventServer:
                         )
                         self._reply(HTTPStatus.OK, {"ok": True})
                         return
+                except ZoteroUnavailable as error:
+                    self._reply(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(error)})
+                    return
                 except Exception as error:
                     traceback.print_exc()
                     self._reply(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(error)})

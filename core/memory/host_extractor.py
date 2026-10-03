@@ -36,13 +36,23 @@ class HostMemoryExtractor:
         *,
         default_scope: str = "user",
         default_namespace: str = "general",
+        character_namespace: Callable[[], str] | str | None = None,
         source_ids: Iterable[str] = (),
         query: Callable[[list[dict[str, str]]], str] | None = None,
     ):
         self.default_scope = default_scope
         self.default_namespace = default_namespace
+        self._character_namespace = character_namespace
         self.source_ids = tuple(str(item) for item in source_ids if str(item))
         self._query = query
+
+    def _resolve_character_namespace(self) -> str:
+        value = (
+            self._character_namespace()
+            if callable(self._character_namespace)
+            else self._character_namespace
+        )
+        return str(value or "").strip()
 
     def __call__(self, conversation_text: str) -> list[MemoryRecord]:
         text = str(conversation_text or "").strip()
@@ -53,6 +63,7 @@ class HostMemoryExtractor:
             payload,
             default_scope=self.default_scope,
             default_namespace=self.default_namespace,
+            character_namespace=self._resolve_character_namespace(),
             default_source="conversation",
             default_source_ids=self.source_ids,
         )
@@ -63,10 +74,16 @@ class HostMemoryExtractor:
                 "role": "system",
                 "content": (
                     "Extract only durable user preferences, constraints, stable facts, "
-                    "and ongoing activity state. Do not store temporary dialogue, "
-                    "assistant claims, or uncertain guesses. Return JSON only: "
+                    "and ongoing activity state. Write every memory text in natural "
+                    "Simplified Chinese. Preserve proper names, acronyms, technical "
+                    "terms, file paths, and code identifiers as needed. Do not store "
+                    "temporary dialogue, assistant claims, or uncertain guesses. "
+                    "For each memory, choose memory_scope=global when it is a durable fact, preference, "
+                    "or constraint about the user/shared world. Choose memory_scope=character when it is "
+                    "the assistant identity, relationship, promise, shared experience, or character-specific "
+                    "story state. Return JSON only: "
                     '{"memories":[{"text":"...","kind":"preference|constraint|fact|episode|story_state",'
-                    '"tags":[],"importance":1-5,"confidence":0.0-1.0}]}'
+                    '"memory_scope":"global|character","tags":[],"importance":1-5,"confidence":0.0-1.0}]}'
                 ),
             },
             {"role": "user", "content": conversation_text[:16000]},

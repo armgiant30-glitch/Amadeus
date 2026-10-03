@@ -14,6 +14,7 @@ from server.local_auth import LocalAuthPolicy
 
 
 def _host(root: Path, **overrides) -> CompanionCardHost:
+    overrides.setdefault("port", 0)
     return CompanionCardHost(
         root,
         backend_url="",

@@ -25,7 +25,7 @@ async function run(message, pendingText) {
 
 startButton.addEventListener("click", () => run("AMADEUS_START_READING", "正在读取当前章节…"));
 comicButton.addEventListener("click", async () => {
-  status.textContent = "正在抓取当前漫画章节…";
+  status.textContent = "正在扫描整章漫画图片…";
   status.className = "";
   const result = await chrome.runtime.sendMessage({ type: "AMADEUS_START_COMIC" });
   if (result?.ok) {

@@ -13,6 +13,14 @@ import sqlite3
 import threading
 from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
+from .markdown_document import (
+    DURABLE_MEMORY_KINDS,
+    MarkdownMemoryEntry,
+    document_hash,
+    has_metadata_ids,
+    parse_document,
+    render_document,
+)
 from .models import MemoryRecord, MemoryStatus, normalize_iso, normalize_text, utc_now_iso
 
 
@@ -54,6 +62,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 
 _FTS_QUERY_SPLIT = re.compile(r"[^\w\u3400-\u9fff]+", re.UNICODE)
 _CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
+_PROJECTION_NAMESPACE_MARKER = re.compile(
+    r"^\s*<!--\s*memory-namespace:\s*(?P<namespace>[^>]+?)\s*-->\s*$",
+    re.MULTILINE,
+)
 
 
 def _fts_terms(query: str) -> list[str]:
@@ -89,8 +101,12 @@ class MemoryStore:
         self.jsonl_path = self.root / "memory.jsonl"
         self.sqlite_path = self.root / "memory.sqlite3"
         self.markdown_path = self.root / "companion.md"
+        self.markdown_hash_path = self.root / "companion.md.sha256"
         self.views_dir = self.root / "views"
+        self.characters_dir = self.root / "characters"
         self._write_lock = threading.RLock()
+        self._projection_lock = threading.RLock()
+        self._syncing_projection = False
 
     @classmethod
     def open(cls, root: str | Path) -> "MemoryStore":
@@ -101,11 +117,13 @@ class MemoryStore:
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.views_dir.mkdir(parents=True, exist_ok=True)
+        self.characters_dir.mkdir(parents=True, exist_ok=True)
         self.jsonl_path.touch(exist_ok=True)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
         if self._index_count() == 0 and self.jsonl_path.stat().st_size:
             self.rebuild_index()
+        self._refresh_projections_safely()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -255,6 +273,8 @@ class MemoryStore:
                 except Exception:
                     connection.rollback()
                     raise
+        if accepted:
+            self._refresh_projections_safely()
         return accepted
 
     def recall(
@@ -409,7 +429,8 @@ class MemoryStore:
                 except Exception:
                     connection.rollback()
                     raise
-            return new_record
+        self._refresh_projections_safely()
+        return new_record
 
     def revoke(self, memory_id: str, *, now: str | None = None) -> MemoryRecord:
         timestamp = normalize_iso(now or utc_now_iso())
@@ -426,7 +447,8 @@ class MemoryStore:
             with self._connect() as connection:
                 self._upsert(connection, revoked)
                 connection.commit()
-            return revoked
+        self._refresh_projections_safely()
+        return revoked
 
     def compact_namespace(
         self,
@@ -485,6 +507,7 @@ class MemoryStore:
                 except Exception:
                     connection.rollback()
                     raise
+        self._refresh_projections_safely()
         return summary
 
     def list_records(
@@ -526,31 +549,384 @@ class MemoryStore:
             connection.commit()
         return len(records)
 
-    def write_projections(self) -> None:
-        records = self.list_records(active_only=True)
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.views_dir.mkdir(parents=True, exist_ok=True)
-        by_namespace: dict[str, list[MemoryRecord]] = {}
-        for record in records:
-            by_namespace.setdefault(record.namespace, []).append(record)
-        self.markdown_path.write_text(self._render_markdown(records), encoding="utf-8")
-        for namespace, namespace_records in by_namespace.items():
-            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", namespace).strip("-") or "general"
-            (self.views_dir / f"{safe_name}.md").write_text(
-                self._render_markdown(namespace_records, title=f"Memory: {namespace}"),
-                encoding="utf-8",
-            )
+    def _refresh_projections_safely(self) -> None:
+        if self._syncing_projection:
+            return
+        try:
+            self.write_projections()
+        except Exception:
+            logger.warning("failed to refresh memory markdown projections", exc_info=True)
 
     @staticmethod
-    def _render_markdown(records: Sequence[MemoryRecord], *, title: str = "Companion Memory") -> str:
-        lines = [f"# {title}", "", "<!-- Generated from memory.jsonl; manual edits are not authoritative. -->", ""]
-        grouped: dict[str, list[MemoryRecord]] = {}
-        for record in records:
-            grouped.setdefault(record.kind, []).append(record)
-        for kind in sorted(grouped):
-            lines.extend((f"## {kind}", ""))
-            for record in sorted(grouped[kind], key=lambda item: (-item.importance, item.updated_at)):
-                tags = f" `{' '.join(record.tags)}`" if record.tags else ""
-                lines.append(f"- {record.text}{tags}")
-            lines.append("")
-        return "\n".join(lines).rstrip() + "\n"
+    def _write_text_atomic(path: Path, value: str) -> None:
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(value, encoding="utf-8", newline="\n")
+        temporary.replace(path)
+
+    @staticmethod
+    def _has_pending_manual_edits(path: Path, hash_path: Path) -> bool:
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8")
+        if not hash_path.is_file():
+            # A legacy/manual document without a known baseline is only
+            # imported when it carries stable IDs. Otherwise regenerating it
+            # is safer than treating every bullet as a full historical delete.
+            return has_metadata_ids(text)
+        saved_hash = hash_path.read_text(encoding="utf-8").strip()
+        return bool(saved_hash) and document_hash(text) != saved_hash
+
+    @staticmethod
+    def _read_markdown_entries(
+        path: Path, *, default_namespace: str
+    ) -> list[MarkdownMemoryEntry]:
+        text = path.read_text(encoding="utf-8")
+        entries = parse_document(text, default_namespace=default_namespace)
+        has_bullets = any(
+            line.lstrip().startswith(("- ", "* ")) for line in text.splitlines()
+        )
+        if has_bullets and not entries:
+            raise ValueError("editable memory document contains bullets but none were parsed")
+        return entries
+
+    @staticmethod
+    def _markdown_entry_matches(record: MemoryRecord, entry: MarkdownMemoryEntry) -> bool:
+        return (
+            record.text == entry.text
+            and record.kind == entry.kind
+            and record.scope == entry.scope
+            and record.namespace == entry.namespace
+            and int(record.importance) == int(entry.importance)
+            and abs(float(record.confidence) - float(entry.confidence)) < 1e-9
+            and tuple(record.tags) == tuple(entry.tags)
+        )
+
+    def _apply_markdown_entries(
+        self,
+        entries: Sequence[MarkdownMemoryEntry],
+        *,
+        namespace_filter: str,
+    ) -> None:
+        duplicate_ids = [
+            memory_id
+            for memory_id, count in _duplicate_counts(
+                entry.memory_id for entry in entries if entry.memory_id
+            ).items()
+            if count > 1
+        ]
+        if duplicate_ids:
+            raise ValueError(f"duplicate memory ids in editable document: {duplicate_ids}")
+
+        existing = {
+            record.id: record
+            for record in self.list_records(active_only=True)
+            if self._record_in_projection_namespace(record, namespace_filter)
+            and record.kind in DURABLE_MEMORY_KINDS
+        }
+        present_ids = {entry.memory_id for entry in entries if entry.memory_id}
+        self._syncing_projection = True
+        try:
+            for memory_id in sorted(set(existing) - present_ids):
+                self.revoke(memory_id)
+            for entry in entries:
+                if not entry.text:
+                    continue
+                if entry.memory_id and entry.memory_id in existing:
+                    current = existing[entry.memory_id]
+                    if self._markdown_entry_matches(current, entry):
+                        continue
+                    updated = current.evolve(
+                        text=entry.text,
+                        kind=entry.kind,
+                        scope=entry.scope,
+                        namespace=entry.namespace,
+                        tags=entry.tags,
+                        importance=entry.importance,
+                        confidence=entry.confidence,
+                        source="manual_markdown",
+                        content_hash="",
+                        updated_at=utc_now_iso(),
+                        valid_to=None,
+                        status=MemoryStatus.ACTIVE.value,
+                        superseded_by=None,
+                    )
+                    self.update_manual(updated)
+                else:
+                    self.remember(
+                        [
+                            MemoryRecord.create(
+                                memory_id=entry.memory_id,
+                                text=entry.text,
+                                kind=entry.kind,
+                                scope=entry.scope,
+                                namespace=entry.namespace,
+                                tags=entry.tags,
+                                importance=entry.importance,
+                                confidence=entry.confidence,
+                                source="manual_markdown",
+                            )
+                        ]
+                    )
+        finally:
+            self._syncing_projection = False
+
+    def update_manual(self, record: MemoryRecord) -> MemoryRecord:
+        """Persist an in-place edit while keeping prior JSONL snapshots."""
+        with self._write_lock, self._connect() as connection:
+            self._append_snapshots((record,))
+            connection.execute("BEGIN")
+            try:
+                self._upsert(connection, record)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        self._refresh_projections_safely()
+        return record
+
+    def update_namespaces(
+        self,
+        namespaces: Mapping[str, str],
+        *,
+        source: str = "namespace_migration",
+    ) -> list[MemoryRecord]:
+        """Bulk-move records between namespaces while retaining history."""
+        cleaned = {
+            str(memory_id): normalize_text(namespace)
+            for memory_id, namespace in namespaces.items()
+            if str(memory_id) and normalize_text(namespace)
+        }
+        if not cleaned:
+            return []
+        timestamp = utc_now_iso()
+        updated: list[MemoryRecord] = []
+        with self._write_lock, self._connect() as connection:
+            for memory_id, namespace in cleaned.items():
+                row = connection.execute(
+                    "SELECT * FROM memory WHERE id = ?", (memory_id,)
+                ).fetchone()
+                if row is None:
+                    continue
+                current = self._record_from_row(row)
+                if current.namespace == namespace:
+                    continue
+                updated.append(
+                    current.evolve(
+                        namespace=namespace,
+                        content_hash="",
+                        updated_at=timestamp,
+                        source=source,
+                    )
+                )
+            if updated:
+                self._append_snapshots(updated)
+                connection.execute("BEGIN")
+                try:
+                    for record in updated:
+                        self._upsert(connection, record)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        if updated:
+            self._refresh_projections_safely()
+        return updated
+
+    def update_texts(
+        self,
+        translations: Mapping[str, str],
+        *,
+        source: str = "translation",
+    ) -> list[MemoryRecord]:
+        """Bulk-rewrite record text while retaining JSONL history snapshots."""
+        cleaned = {
+            str(memory_id): normalize_text(value)
+            for memory_id, value in translations.items()
+            if str(memory_id) and normalize_text(value)
+        }
+        if not cleaned:
+            return []
+        timestamp = utc_now_iso()
+        updated: list[MemoryRecord] = []
+        with self._write_lock, self._connect() as connection:
+            for memory_id, value in cleaned.items():
+                row = connection.execute(
+                    "SELECT * FROM memory WHERE id = ?", (memory_id,)
+                ).fetchone()
+                if row is None:
+                    continue
+                current = self._record_from_row(row)
+                if current.text == value:
+                    continue
+                updated.append(
+                    current.evolve(
+                        text=value,
+                        content_hash="",
+                        updated_at=timestamp,
+                        source=source,
+                    )
+                )
+            if updated:
+                self._append_snapshots(updated)
+                connection.execute("BEGIN")
+                try:
+                    for record in updated:
+                        self._upsert(connection, record)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        if updated:
+            self._refresh_projections_safely()
+        return updated
+
+    @staticmethod
+    def _record_in_projection_namespace(record: MemoryRecord, namespace: str) -> bool:
+        if namespace == "general":
+            return not record.namespace.startswith("character:")
+        return record.namespace == namespace
+
+    @staticmethod
+    def _safe_namespace_filename(namespace: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", namespace).strip("-") or "general"
+
+    def _character_namespaces(self, records: Sequence[MemoryRecord]) -> list[str]:
+        namespaces = {
+            record.namespace
+            for record in records
+            if record.namespace.startswith("character:")
+        }
+        if self.characters_dir.is_dir():
+            for path in sorted(self.characters_dir.glob("*.md")):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                match = _PROJECTION_NAMESPACE_MARKER.search(text)
+                if match:
+                    namespace = match.group("namespace").strip()
+                elif path.stem.startswith("character-"):
+                    namespace = "character:" + path.stem[len("character-") :]
+                else:
+                    continue
+                if namespace.startswith("character:"):
+                    namespaces.add(namespace)
+        return sorted(namespaces)
+
+    def _editable_projection_specs(
+        self, records: Sequence[MemoryRecord]
+    ) -> list[tuple[str, Path, Path, str]]:
+        specs = [
+            ("general", self.markdown_path, self.markdown_hash_path, "共享记忆（用户/阅读/研究）"),
+        ]
+        for namespace in self._character_namespaces(records):
+            safe_name = self._safe_namespace_filename(namespace)
+            path = self.characters_dir / f"{safe_name}.md"
+            specs.append(
+                (
+                    namespace,
+                    path,
+                    path.with_name(path.name + ".sha256"),
+                    f"角色记忆: {namespace}",
+                )
+            )
+        return specs
+
+    def write_projections(self, *, force: bool = False) -> None:
+        """Sync editable documents, then render global, character and view files."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.views_dir.mkdir(parents=True, exist_ok=True)
+        self.characters_dir.mkdir(parents=True, exist_ok=True)
+        with self._projection_lock:
+            records = self.list_records(active_only=True)
+            for namespace, path, hash_path, _title in self._editable_projection_specs(records):
+                if force or not self._has_pending_manual_edits(path, hash_path):
+                    continue
+                try:
+                    self._apply_markdown_entries(
+                        self._read_markdown_entries(
+                            path, default_namespace=namespace
+                        ),
+                        namespace_filter=namespace,
+                    )
+                except Exception:
+                    logger.warning(
+                        "manual memory document %s could not be imported; preserving it",
+                        path,
+                        exc_info=True,
+                    )
+                    return
+
+            records = self.list_records(active_only=True)
+            specs = self._editable_projection_specs(records)
+            for namespace, path, hash_path, title in specs:
+                durable_records = [
+                    record
+                    for record in records
+                    if self._record_in_projection_namespace(record, namespace)
+                    and record.kind in DURABLE_MEMORY_KINDS
+                ]
+                document = render_document(
+                    durable_records,
+                    title=title,
+                    editable=True,
+                )
+                if namespace != "general":
+                    document = (
+                        f"<!-- memory-namespace: {namespace} -->\n" + document
+                    )
+                self._write_text_atomic(path, document)
+                self._write_text_atomic(hash_path, document_hash(document) + "\n")
+
+            by_namespace: dict[str, list[MemoryRecord]] = {}
+            for record in records:
+                by_namespace.setdefault(record.namespace, []).append(record)
+            view_lines = [
+                "# Memory Views",
+                "",
+                "> 可编辑文档按全局和角色分开管理；下面还有自动生成的完整 namespace 视图。",
+                "",
+                "## Editable documents",
+                "",
+            ]
+            for namespace, path, _hash_path, title in specs:
+                relative = os.path.relpath(path, self.views_dir).replace(os.sep, "/")
+                count = len(
+                    [
+                        record
+                        for record in records
+                        if self._record_in_projection_namespace(record, namespace)
+                        and record.kind in DURABLE_MEMORY_KINDS
+                    ]
+                )
+                view_lines.append(f"- [{title}]({relative}) - {count} editable")
+
+            view_lines.extend(["", "## Generated namespace views", ""])
+            for namespace in sorted(by_namespace):
+                namespace_records = by_namespace[namespace]
+                safe_name = self._safe_namespace_filename(namespace)
+                filename = f"{safe_name}.md"
+                self._write_text_atomic(
+                    self.views_dir / filename,
+                    render_document(
+                        namespace_records,
+                        title=f"Memory: {namespace}",
+                        editable=False,
+                    ),
+                )
+                view_lines.append(
+                    f"- [{namespace}]({filename}) - {len(namespace_records)} active"
+                )
+            if not by_namespace:
+                view_lines.append("_No active namespace memories._")
+            self._write_text_atomic(
+                self.views_dir / "index.md",
+                "\n".join(view_lines).rstrip() + "\n",
+            )
+
+
+def _duplicate_counts(values):
+    counts = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts

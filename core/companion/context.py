@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import html
+import re
 
 from core.memory import MemoryContextProvider
 from core.reading import ReadingChunk, ReadingSessionStore, SpoilerGuard
@@ -32,11 +33,17 @@ class CompanionContextBuilder:
         book_id: str | None = None,
         chunks: Sequence[ReadingChunk] = (),
         include_activity_memory: bool = True,
+        prior_user_messages: Sequence[str] = (),
     ) -> str:
         blocks: list[str] = []
         reading_context = self.reading.get_context(book_id) if book_id else None
         if reading_context is not None:
-            allowed = self.spoiler_guard.prepare_chunks(reading_context, chunks) if chunks else []
+            # Zotero has no page/read cursor contract in this integration.
+            # A deliberately synced item is the current reading context in full.
+            if reading_context.kind == "zotero":
+                allowed = list(chunks)
+            else:
+                allowed = self.spoiler_guard.prepare_chunks(reading_context, chunks) if chunks else []
             blocks.append(self._render_reading(reading_context, allowed))
         scopes = ("user", "activity") if include_activity_memory else ("user",)
         namespace = reading_context.namespace if reading_context else None
@@ -44,7 +51,34 @@ class CompanionContextBuilder:
         memory_block = self.memory.render(records)
         if memory_block:
             blocks.append(memory_block)
+        repetition_block = self._repeat_context(query, prior_user_messages)
+        if repetition_block:
+            blocks.append(repetition_block)
         return "\n\n".join(blocks)
+
+    @staticmethod
+    def _normalize_question(value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "")).strip().casefold()
+
+    def _repeat_context(self, query: str, prior_user_messages: Sequence[str]) -> str:
+        normalized = self._normalize_question(query)
+        if len(normalized) < 2:
+            return ""
+        repeats = sum(
+            1
+            for message in prior_user_messages
+            if self._normalize_question(message) == normalized
+        )
+        if repeats < 1:
+            return ""
+        return (
+            "<repetition_context>\n"
+            f"The user has already asked this exact question {repeats + 1} times in this conversation.\n"
+            "Do not repeat the previous answer verbatim. Briefly acknowledge that it was asked before, "
+            "then add new information, clarify what has changed, or ask what part is still unanswered. "
+            "Do not claim to have forgotten the earlier exchange.\n"
+            "</repetition_context>"
+        )
 
     def remember_turn(
         self,

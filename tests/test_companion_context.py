@@ -113,3 +113,27 @@ def test_companion_runtime_composes_services(tmp_path: Path) -> None:
         assert "book-1" in block
     finally:
         runtime.close()
+
+def test_comic_scene_does_not_get_overridden_by_zotero(tmp_path: Path) -> None:
+    from core.companion import CompanionRuntime
+
+    runtime = CompanionRuntime(tmp_path, reading_server_port=0)
+    try:
+        runtime.ingest_reading_event(
+            {
+                "book_id": "zotero:paper-1",
+                "kind": "zotero",
+                "chapter": "译文 Markdown",
+                "cursor": 20,
+                "text": "这是 Zotero 译文正文，不应该覆盖当前漫画场景。",
+            }
+        )
+        runtime.bind_scene("comic", title="小爱漫画", window_handle="browser", process_name="browser")
+        runtime.record_scene_capture("当前漫画页摘要：两位少女在家里讨论同住。")
+        block = runtime.context_block("这一页讲了什么？")
+        assert "当前漫画页摘要" in block
+        assert "<scene_context>" in block
+        assert "<reading_context>" not in block
+        assert "这是 Zotero 译文正文" not in block
+    finally:
+        runtime.close(timeout=2.0)

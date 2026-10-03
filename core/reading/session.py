@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import threading
-from typing import Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 
 from .models import ReadingChunk, ReadingContext, utc_now_iso
 
@@ -56,6 +58,7 @@ class ReadingSessionStore:
     def __init__(self, root: str | Path):
         self.root = Path(root).expanduser().resolve()
         self.path = self.root / "reading.sqlite3"
+        self.reports_dir = self.root / "reports"
         self._lock = threading.RLock()
 
     @classmethod
@@ -66,6 +69,7 @@ class ReadingSessionStore:
 
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
 
@@ -240,12 +244,111 @@ class ReadingSessionStore:
             for row in rows
         ]
 
-    def latest_context(self) -> ReadingContext | None:
+    def latest_context(self, *, kind: str | None = None) -> ReadingContext | None:
+        normalized_kind = str(kind or "").strip()
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT book_id FROM reading_sessions ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
+            if normalized_kind:
+                row = connection.execute(
+                    """
+                    SELECT book_id FROM reading_sessions
+                    WHERE kind = ? ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (normalized_kind,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT book_id FROM reading_sessions ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
         return self.get_context(str(row["book_id"])) if row else None
+
+    def compact_expired(
+        self,
+        *,
+        older_than_hours: float = 6.0,
+        kinds: Sequence[str] = ("zotero",),
+        summarizer: Callable[[ReadingContext, Sequence[ReadingChunk]], str] | None = None,
+        now: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Replace expired full text with a reading report and summary chunk.
+
+        A failed or empty summarizer keeps the original chunks for a later
+        retry. Only the explicitly listed kinds are compacted.
+        """
+        effective_now = _parse_iso(now or utc_now_iso())
+        cutoff = effective_now - timedelta(hours=max(0.0, float(older_than_hours)))
+        allowed_kinds = {str(kind) for kind in kinds}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.book_id, MAX(c.updated_at) AS latest, s.kind
+                FROM reading_chunks c
+                LEFT JOIN reading_sessions s ON s.book_id = c.book_id
+                GROUP BY c.book_id, s.kind
+                """
+            ).fetchall()
+        compacted: list[dict[str, object]] = []
+        for row in rows:
+            book_id = str(row["book_id"])
+            kind = str(row["kind"] or "")
+            if allowed_kinds and kind not in allowed_kinds:
+                continue
+            latest = _parse_iso(str(row["latest"]))
+            if latest > cutoff:
+                continue
+            chunks = [
+                chunk
+                for chunk in self.list_chunks(book_id)
+                if chunk.id != "reading-summary"
+            ]
+            if not chunks:
+                continue
+            context = self.get_context(book_id) or ReadingContext(book_id=book_id, kind=kind)
+            try:
+                summary = (
+                    summarizer(context, chunks).strip()
+                    if summarizer is not None
+                    else _fallback_summary(chunks)
+                )
+            except Exception:
+                summary = ""
+            if not summary:
+                continue
+            report_path = self.reports_dir / f"{_safe_filename(book_id)}.md"
+            report_path.write_text(
+                _render_reading_report(context, chunks, summary),
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.save_chunks(
+                book_id,
+                [
+                    ReadingChunk(
+                        id="reading-summary",
+                        chapter="阅读总结",
+                        start_offset=0,
+                        end_offset=0,
+                        page=None,
+                        text=summary,
+                    )
+                ],
+            )
+            with self._lock, self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM reading_chunks WHERE book_id = ? AND chunk_id <> ?",
+                    (book_id, "reading-summary"),
+                )
+                connection.commit()
+            compacted.append(
+                {
+                    "book_id": book_id,
+                    "kind": kind,
+                    "report": str(report_path),
+                    "source_chunks": len(chunks),
+                    "source_chars": sum(len(chunk.text) for chunk in chunks),
+                    "summary_chars": len(summary),
+                }
+            )
+        return compacted
 
     def update_from_event(self, event: Mapping[str, object]) -> ReadingContext:
         book_id = str(event.get("book_id") or "").strip()
@@ -284,3 +387,43 @@ class ReadingSessionStore:
                     )],
                 )
         return saved
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-")
+    return cleaned or "reading-session"
+
+
+def _fallback_summary(chunks: Sequence[ReadingChunk]) -> str:
+    text = "\n\n".join(chunk.text.strip() for chunk in chunks if chunk.text.strip())
+    if not text:
+        return ""
+    if len(text) <= 2400:
+        return text
+    return text[:1800] + "\n\n[...]\n\n" + text[-600:]
+
+
+def _render_reading_report(
+    context: ReadingContext,
+    chunks: Sequence[ReadingChunk],
+    summary: str,
+) -> str:
+    title = context.current_chapter or context.book_id
+    return (
+        f"# 阅读报告：{title}\n\n"
+        f"- book_id: {context.book_id}\n"
+        f"- kind: {context.kind}\n"
+        f"- 原文块数: {len(chunks)}\n"
+        f"- 原文字符: {sum(len(chunk.text) for chunk in chunks)}\n"
+        f"- 最后更新: {context.updated_at}\n\n"
+        "## 摘要\n\n"
+        f"{summary.strip()}\n\n"
+        "<!-- 原文已按 6 小时保留策略清理；重新阅读时请再次发送 Zotero 条目。 -->\n"
+    )
+

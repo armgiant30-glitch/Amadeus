@@ -21,7 +21,8 @@ def _json_request(url: str, payload: dict | None = None) -> dict:
 
 def test_reading_event_server_persists_context_and_turns(tmp_path: Path) -> None:
     store = ReadingSessionStore.open(tmp_path)
-    server = ReadingEventServer(store, port=0)
+    activated = []
+    server = ReadingEventServer(store, port=0, on_context_changed=activated.append)
     port = server.start()
     base = f"http://127.0.0.1:{port}"
     try:
@@ -41,6 +42,8 @@ def test_reading_event_server_persists_context_and_turns(tmp_path: Path) -> None
         )
         assert event["ok"] is True
         assert event["context"]["namespace"] if "namespace" in event["context"] else True
+        assert activated[-1].book_id == "book-1"
+        assert activated[-1].kind == "browser"
 
         session = _json_request(f"{base}/reading/session?book_id=book-1")
         assert session["ok"] is True

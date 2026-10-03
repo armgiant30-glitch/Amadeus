@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Amadeus Reading Bridge",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "description": "Send selected novel text or a comic chapter to Amadeus Companion.",
-  "permissions": ["contextMenus", "storage", "tabs", "activeTab"],
+  "permissions": ["contextMenus", "storage", "tabs", "activeTab", "scripting"],
   "host_permissions": ["http://127.0.0.1:17878/*"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Send selection to Amadeus", "default_popup": "popup.html" },

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Amadeus Zotero Bridge",
+  "version": "0.2.1",
+  "description": "Send the selected Zotero item into Amadeus Companion reading context.",
+  "author": "Amadeus Contributors",
+  "homepage_url": "https://github.com/Code-Amadeus/Amadeus",
+  "applications": {
+    "zotero": {
+      "id": "amadeus-zotero-bridge@example.com",
+      "strict_min_version": "8.0-beta.21",
+      "strict_max_version": "10.99.99",
+      "update_url": "https://zotero-download.s3.amazonaws.com/tmp/make-it-red/updates-2.0.json"
+    }
+  },
+  "icons": {
+    "48": "icon-48.png",
+    "96": "icon-96.png"
+  }
+}

@@ -63,13 +63,21 @@ def overlay_class(shell=vn_overlay_window):
             if not self._lite:
                 return super()._resolve_key(emotion)
             key = super()._resolve_key(emotion)
-            return key if key in self._lite.emotions else "normal"
+            return self._lite.resolve_emotion(key)
 
         def _set_emotion(self, emotion, state="idle", *, advance_variant=False):
             super()._set_emotion(emotion, state)
             if self._lite:
-                self._lite.select(self._current_emotion, self._current_state == "speaking", self._static_idle,
-                                  advance_variant=advance_variant)
+                speaking = self._current_state == "speaking"
+                selected = (
+                    self._lite.choose_speaking_emotion(
+                        self._current_emotion,
+                        advance_variant=advance_variant,
+                    )
+                    if speaking else self._current_emotion
+                )
+                self._lite.request_select(selected, speaking, self._static_idle,
+                                          advance_variant=advance_variant)
                 self._draw_lite()
 
         def _draw_lite(self):
@@ -90,6 +98,7 @@ def overlay_class(shell=vn_overlay_window):
                         resized = frame.convert("RGBa").resize((self.avatar_size, self.avatar_size), Image.Resampling.LANCZOS).convert("RGBA")
                         frame.close()
                         frame = resized
+
                     # No old per-frame tint/sweep/re-crop; display the same RGBA tile as Canvas.
                     photo = ImageTk.PhotoImage(frame, master=self.root)
                     self.avatar_label.configure(image=photo)
@@ -118,7 +127,12 @@ def overlay_class(shell=vn_overlay_window):
             playback = payload.get("source") == "vn_playback"
             subtitle = payload.get("source") == "vn_pretranslation"
             new_sentence = playback and payload.get("speaking") is True and sentence != self._sentence_id
-            if (subtitle or (playback and payload.get("speaking") is False)) and sentence and sentence != self._sentence_id:
+            if subtitle and sentence:
+                # Pretranslation commonly arrives before the audio start edge.
+                # Adopt it as the pending sentence so the later playback event
+                # and this caption share one identity instead of dropping it.
+                self._sentence_id = sentence
+            elif (playback and payload.get("speaking") is False) and sentence and sentence != self._sentence_id:
                 return
             if playback and payload.get("speaking") is True:
                 self._sentence_id = sentence
@@ -136,6 +150,16 @@ def overlay_class(shell=vn_overlay_window):
                 self.root.after_cancel(self._return_timer)
                 self._return_timer = None
             emotion, duration = shell.infer_emotion(raw, str(payload.get("emotion") or ""))
+            if payload.get("source") == "vn_preview":
+                # The expression is known before the voice queue starts.
+                # Hold it in idle pose until the real playback edge arrives.
+                self._idle_deadline = 0.0
+                self._active_until = float("inf")
+                self._set_emotion(emotion, "idle")
+                if getattr(self, "visible", True):
+                    self.root.deiconify()
+                    self.root.lift()
+                return
             speaking = payload.get("speaking")
             state = str(payload.get("portrait_state") or payload.get("state") or "").strip().lower()
             if state not in {"idle", "speaking"}:

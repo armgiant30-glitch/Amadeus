@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 from core.companion import CompanionRuntime
 
 
@@ -11,6 +14,35 @@ ONE_PIXEL_PNG = (
 )
 
 
+def test_comic_chapter_keeps_more_than_eight_pages(tmp_path, monkeypatch) -> None:
+    calls = []
+
+    def fake_vision(image_base64: str, *, prompt: str = "", **kwargs):
+        calls.append({"chars": len(image_base64), "prompt": prompt})
+        return {"description": "十二页章节摘要：主角依次经过车站、旧街和天台。"}
+
+    fake_module = types.ModuleType("llm.qwen_client")
+    fake_module.qwen_vision_describe = fake_vision
+    monkeypatch.setitem(sys.modules, "llm.qwen_client", fake_module)
+    runtime = CompanionRuntime(tmp_path)
+    try:
+        result = runtime._handle_comic_chapter(
+            {
+                "book_id": "book:comic-many-pages",
+                "chapter": "第一话 全章",
+                "images": [
+                    {"data_url": ONE_PIXEL_PNG, "width": 1, "height": 1}
+                    for _ in range(12)
+                ],
+            }
+        )
+        assert result["pages_used"] == 12
+        assert len(calls) == 1
+        assert "共 12 页" in calls[0]["prompt"]
+    finally:
+        runtime.close()
+
+
 def test_comic_chapter_summary_is_cached_and_future_is_not_loaded(tmp_path, monkeypatch) -> None:
     calls = []
 
@@ -18,7 +50,9 @@ def test_comic_chapter_summary_is_cached_and_future_is_not_loaded(tmp_path, monk
         calls.append({"chars": len(image_base64), "prompt": prompt})
         return {"description": "第一话摘要：主角在车站重逢，并发现一封旧信。"}
 
-    monkeypatch.setattr("llm.qwen_client.qwen_vision_describe", fake_vision)
+    fake_module = types.ModuleType("llm.qwen_client")
+    fake_module.qwen_vision_describe = fake_vision
+    monkeypatch.setitem(sys.modules, "llm.qwen_client", fake_module)
     runtime = CompanionRuntime(tmp_path)
     payload = {
         "book_id": "book:comic-1",

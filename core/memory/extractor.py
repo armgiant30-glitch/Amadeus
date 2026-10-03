@@ -26,6 +26,7 @@ def parse_extractor_payload(
     *,
     default_scope: str = "user",
     default_namespace: str = "general",
+    character_namespace: str | None = None,
     default_source: str = "conversation",
     default_source_ids: Iterable[str] = (),
 ) -> list[MemoryRecord]:
@@ -39,7 +40,16 @@ def parse_extractor_payload(
         raise TypeError("extractor payload must be a mapping or list")
     source_ids = tuple(str(item) for item in default_source_ids if str(item))
     records: list[MemoryRecord] = []
-    allowed = {"text", "kind", "scope", "namespace", "tags", "importance", "confidence"}
+    allowed = {
+        "text",
+        "kind",
+        "scope",
+        "namespace",
+        "memory_scope",
+        "tags",
+        "importance",
+        "confidence",
+    }
     for raw in raw_items:
         if not isinstance(raw, Mapping):
             continue
@@ -49,12 +59,20 @@ def parse_extractor_payload(
         text = str(raw.get("text") or "").strip()
         if not text:
             continue
+        explicit_namespace = str(raw.get("namespace") or "").strip()
+        memory_scope = str(raw.get("memory_scope") or "").strip().lower()
+        if explicit_namespace:
+            namespace = explicit_namespace
+        elif memory_scope in {"character", "assistant"}:
+            namespace = character_namespace or default_namespace
+        else:
+            namespace = default_namespace
         records.append(
             MemoryRecord.create(
                 text=text,
                 kind=str(raw.get("kind") or "fact"),
                 scope=str(raw.get("scope") or default_scope),
-                namespace=str(raw.get("namespace") or default_namespace),
+                namespace=namespace,
                 tags=tuple(raw.get("tags") or ()),
                 importance=int(raw.get("importance", 3)),
                 confidence=float(raw.get("confidence", 0.8)),

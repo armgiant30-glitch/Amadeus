@@ -108,3 +108,5 @@ def test_host_memory_extractor_uses_injected_query() -> None:
     assert records[0].namespace == "reading:general"
     assert records[0].source_ids == ("turn-1",)
     assert "Return JSON only" in seen[0][0]["content"]
+    assert "memory_scope" in seen[0][0]["content"]
+    assert "Simplified Chinese" in seen[0][0]["content"]
