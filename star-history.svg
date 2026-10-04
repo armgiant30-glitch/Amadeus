@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" viewBox="0 0 760 620">
+<title id="title">Amadeus star history</title>
+<desc id="desc">Cumulative counts of current GitHub stargazers by star date. The curve passes through every daily total. No user identities are stored.</desc>
+<defs><filter id="pen" x="-2%" y="-2%" width="104%" height="104%">
+<feTurbulence type="fractalNoise" baseFrequency=".035 .14" numOctaves="1" seed="7" result="grain"/>
+<feDisplacementMap in="SourceGraphic" in2="grain" scale="1.1" xChannelSelector="R" yChannelSelector="G"/>
+</filter></defs>
+<style>
+.background{fill:#fcfcf8;stroke:#e2e8df}.grid{stroke:#dce4dc;stroke-width:1;stroke-dasharray:3 7}.axis{fill:#53675d;font:15px 'Segoe Print','Comic Sans MS',cursive}.heading{fill:#203c2e;font:700 30px 'Segoe Print','Comic Sans MS',cursive}.total{fill:#286749;font:700 28px 'Segoe Print','Comic Sans MS',cursive}.meta{fill:#64756c;font:14px 'Segoe UI',sans-serif}.line{fill:none;stroke:#348663;stroke-width:3.4;stroke-linecap:round;stroke-linejoin:round;filter:url(#pen)}.baseline{fill:none;stroke:#6b8072;stroke-width:1.5;stroke-linecap:round;filter:url(#pen)}.endpoint{fill:#348663;stroke:#fcfcf8;stroke-width:2}
+@media(prefers-color-scheme:dark){.background{fill:#0d1712;stroke:#2d4034}.grid{stroke:#304238}.axis,.meta{fill:#a1b7a9}.heading{fill:#e2eee5}.total{fill:#9bd8b6}.line{stroke:#83cba5}.endpoint{fill:#83cba5;stroke:#0d1712}.baseline{stroke:#819c8a}}
+</style>
+<rect class="background" x="0.5" y="0.5" width="759" height="619" rx="12"/>
+<text class="heading" x="58" y="59">Star History</text>
+<text class="total" x="702" y="59" text-anchor="end">0 stars</text>
+<text class="meta" x="58" y="89">armgiant30-glitch/Amadeus</text>
+<line class="grid" x1="80" y1="520.0" x2="702" y2="520.0"/>
+<text class="axis" x="68" y="524.0" text-anchor="end">0</text>
+<line class="grid" x1="80" y1="138.0" x2="702" y2="138.0"/>
+<text class="axis" x="68" y="142.0" text-anchor="end">1</text>
+<text class="axis" x="80.0" y="552" text-anchor="start">2026-10-04</text>
+<path class="baseline" d="M 80 130 V 520 H 710"/>
+<path class="line" d="M 80.0 520.0 H 702.0"/>
+<circle class="endpoint" cx="702.0" cy="520.0" r="5"/>
+<text class="meta" x="80" y="584">Cumulative count of current stargazers</text>
+<text class="meta" x="702" y="584" text-anchor="end">No stars yet</text>
+</svg>
